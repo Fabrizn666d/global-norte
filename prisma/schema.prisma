@@ -1,0 +1,288 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id              String    @id @default(cuid())
+  nombre          String
+  apellido        String
+  email           String    @unique
+  password        String
+  telefono        String
+  dni             String?
+  ruc             String?
+  nombreNegocio   String?
+  tipoNegocio     String?
+  departamento    String?
+  provincia       String?
+  distrito        String?
+  direccion       String?
+  referencia      String?
+  rol             String    @default("cliente")
+  activo          Boolean   @default(true)
+  bloqueado       Boolean   @default(false)
+  motivoBloqueo   String?
+  emailVerificado Boolean   @default(false)
+  ultimoAcceso    DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  orders          Order[]
+  addresses       Address[]
+  carts           Cart[]
+}
+
+model Address {
+  id           String   @id @default(cuid())
+  userId       String
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  alias        String
+  nombres      String
+  telefono     String
+  departamento String
+  provincia    String
+  distrito     String
+  direccion    String
+  referencia   String?
+  esPrincipal  Boolean  @default(false)
+  createdAt    DateTime @default(now())
+}
+
+model Category {
+  id          String     @id @default(cuid())
+  nombre      String
+  slug        String     @unique
+  descripcion String?
+  imagen      String?
+  icono       String?
+  padreId     String?
+  padre       Category?  @relation("CategoryTree", fields: [padreId], references: [id])
+  hijos       Category[] @relation("CategoryTree")
+  orden       Int        @default(0)
+  activo      Boolean    @default(true)
+  createdAt   DateTime   @default(now())
+  products    Product[]
+}
+
+model Brand {
+  id          String    @id @default(cuid())
+  nombre      String    @unique
+  slug        String    @unique
+  logo        String?
+  descripcion String?
+  destacada   Boolean   @default(false)
+  orden       Int       @default(0)
+  activo      Boolean   @default(true)
+  products    Product[]
+}
+
+model Product {
+  id               String      @id @default(cuid())
+  codigoInterno    String      @unique
+  nombre           String
+  slug             String      @unique
+  descripcion      String?
+  categoryId       String
+  category         Category    @relation(fields: [categoryId], references: [id])
+  brandId          String?
+  brand            Brand?      @relation(fields: [brandId], references: [id])
+  precioUnitario   Float
+  precioCaja       Float?
+  unidadesPorCaja  Int?
+  etiquetaCaja     String?
+  precioAnterior   Float?
+  stock            Int         @default(0)
+  stockMinimo      Int         @default(1)
+  unidad           String      @default("unidad")
+  imagenes         String      @default("[]")
+  imagenPrincipal  String?
+  activo           Boolean     @default(true)
+  destacado        Boolean     @default(false)
+  enOferta         Boolean     @default(false)
+  nuevo            Boolean     @default(false)
+  agotado          Boolean     @default(false)
+  tags             String      @default("[]")
+  seoTitulo        String?
+  seoDesc          String?
+  vistas           Int         @default(0)
+  vendidos         Int         @default(0)
+  createdAt        DateTime    @default(now())
+  updatedAt        DateTime    @updatedAt
+  orderItems       OrderItem[]
+  cartItems        CartItem[]
+
+  @@index([categoryId])
+  @@index([brandId])
+  @@index([activo, destacado])
+}
+
+model Cart {
+  id        String     @id @default(cuid())
+  userId    String?
+  user      User?      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sessionId String?
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+  items     CartItem[]
+
+  @@index([userId])
+  @@index([sessionId])
+}
+
+model CartItem {
+  id         String   @id @default(cuid())
+  cartId     String
+  cart       Cart     @relation(fields: [cartId], references: [id], onDelete: Cascade)
+  productId  String
+  product    Product  @relation(fields: [productId], references: [id])
+  cantidad   Int      @default(1)
+  tipoPrecio String   @default("unidad")
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([cartId, productId, tipoPrecio])
+}
+
+model Order {
+  id                   String         @id @default(cuid())
+  numero               String         @unique
+  userId               String?
+  user                 User?          @relation(fields: [userId], references: [id])
+  clienteNombre        String
+  clienteApellido      String
+  clienteEmail         String
+  clienteTelefono      String
+  clienteDni           String?
+  clienteRuc           String?
+  clienteNegocio       String?
+  entregaDireccion     String
+  entregaDistrito      String
+  entregaProvincia     String
+  entregaDepartamento  String
+  entregaReferencia    String?
+  estado               String         @default("pendiente")
+  metodoPago           String         @default("efectivo")
+  pagoEstado           String         @default("pendiente")
+  subtotal             Float
+  descuento            Float          @default(0)
+  total                Float
+  pdfUrl               String?
+  whatsappEnviado      Boolean        @default(false)
+  emailEnviado         Boolean        @default(false)
+  notasCliente         String?
+  notasInternas        String?
+  createdAt            DateTime       @default(now())
+  updatedAt            DateTime       @updatedAt
+  items                OrderItem[]
+  historial            OrderHistory[]
+
+  @@index([userId])
+  @@index([estado])
+  @@index([createdAt])
+}
+
+model OrderItem {
+  id            String   @id @default(cuid())
+  orderId       String
+  order         Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  productId     String
+  product       Product  @relation(fields: [productId], references: [id])
+  codigoInterno String
+  nombre        String
+  marca         String?
+  imagen        String?
+  tipoPrecio    String
+  etiqueta      String?
+  precio        Float
+  cantidad      Int
+  subtotal      Float
+}
+
+model OrderHistory {
+  id        String   @id @default(cuid())
+  orderId   String
+  order     Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  estado    String
+  nota      String?
+  userId    String?
+  createdAt DateTime @default(now())
+}
+
+model Banner {
+  id            String    @id @default(cuid())
+  titulo        String
+  subtitulo     String?
+  descripcion   String?
+  ctaTexto      String?
+  ctaLink       String?
+  imagenDesktop String
+  imagenMobile  String?
+  posicion      String    @default("hero")
+  colorTexto    String    @default("light")
+  activo        Boolean   @default(true)
+  orden         Int       @default(0)
+  fechaInicio   DateTime?
+  fechaFin      DateTime?
+  clics         Int       @default(0)
+  createdAt     DateTime  @default(now())
+}
+
+model Promotion {
+  id          String   @id @default(cuid())
+  nombre      String
+  descripcion String?
+  tipo        String
+  valor       Float?
+  productos   String   @default("[]")
+  activo      Boolean  @default(true)
+  fechaInicio DateTime
+  fechaFin    DateTime
+  createdAt   DateTime @default(now())
+}
+
+model Setting {
+  id        String   @id @default(cuid())
+  clave     String   @unique
+  valor     String
+  tipo      String   @default("string")
+  grupo     String   @default("general")
+  label     String?
+  updatedAt DateTime @updatedAt
+}
+
+model AdminUser {
+  id           String    @id @default(cuid())
+  nombre       String
+  email        String    @unique
+  password     String
+  rol          String    @default("admin")
+  activo       Boolean   @default(true)
+  ultimoAcceso DateTime?
+  createdAt    DateTime  @default(now())
+}
+
+model RateLimit {
+  id             String    @id @default(cuid())
+  ip             String
+  accion         String
+  intentos       Int       @default(1)
+  bloqueadoHasta DateTime?
+  updatedAt      DateTime  @updatedAt
+
+  @@unique([ip, accion])
+}
+
+model ActivityLog {
+  id        String   @id @default(cuid())
+  userId    String?
+  userName  String?
+  accion    String
+  modulo    String
+  detalle   String?
+  ip        String?
+  createdAt DateTime @default(now())
+}

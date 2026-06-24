@@ -37,6 +37,16 @@ const settings = [
   { clave: "pdf_pie_pagina", valor: "Este documento es una orden interna de pedido, no tiene validez tributaria.", grupo: "pdf", label: "Pie de pagina PDF" },
 ];
 
+async function seedCommercialRules() {
+  await prisma.coupon.upsert({
+    where: { codigo: "BODEGA10" },
+    create: { codigo: "BODEGA10", descripcion: "S/ 10 de descuento desde S/ 100", tipo: "fijo", valor: 10, montoMinimo: 100, limitePorCliente: 5, activo: true, prioridad: 10 },
+    update: { activo: true },
+  });
+  const existing = await prisma.bonus.findFirst({ where: { codigoInterno: "REGALO-MAYORISTA" } });
+  if (!existing) await prisma.bonus.create({ data: { nombre: "Regalo mayorista", codigoInterno: "REGALO-MAYORISTA", descripcion: "Bonificacion por pedido mayorista", condicionTipo: "monto", condicionValor: 200, beneficio: "Producto de bonificacion", activo: true } });
+}
+
 async function main() {
   if (!adminSeedPassword) {
     throw new Error("Define ADMIN_SEED_PASSWORD en .env antes de ejecutar el seed.");
@@ -82,10 +92,16 @@ async function main() {
         ],
       });
     }
+    await seedCommercialRules();
     process.stdout.write(`Seed seguro: se conservaron ${existingProducts} productos existentes.\n`);
     return;
   }
 
+  await prisma.couponUsage.deleteMany();
+  await prisma.customerBenefit.deleteMany();
+  await prisma.notification.deleteMany();
+  await prisma.bonus.deleteMany();
+  await prisma.coupon.deleteMany();
   await prisma.orderHistory.deleteMany();
   await prisma.orderItem.deleteMany();
   await prisma.order.deleteMany();
@@ -202,6 +218,7 @@ async function main() {
       rol: "superadmin",
     },
   });
+  await seedCommercialRules();
 
   await prisma.activityLog.create({
     data: {

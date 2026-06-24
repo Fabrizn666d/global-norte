@@ -14,6 +14,8 @@ import { makeSlug, toCsv } from "@/lib/format";
 import { createAdminOrderPdf, createOrderPdf } from "@/lib/pdf";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { nextOrderNumber } from "@/lib/orders";
+import { evaluateCommerce } from "@/lib/commerce";
+import { ConsolidatedRow, createConsolidatedPdf } from "@/lib/consolidated-pdf";
 import { sendOrderEmails, sendOrderWhatsApp } from "@/lib/notifications";
 
 export const dynamic = "force-dynamic";
@@ -63,6 +65,8 @@ const checkoutSchema = z.object({
   provincia: z.string().default("Lima"),
   departamento: z.string().default("Lima"),
   referencia: z.string().optional(),
+  mapsUrl: z.string().url().optional().or(z.literal("")),
+  couponCode: z.string().optional(),
   notas: z.string().optional(),
   items: z.array(z.object({
     productId: z.string().min(1),
@@ -88,6 +92,9 @@ const productSchema = z.object({
   imagenPrincipal: z.string().optional().nullable(),
   activo: z.boolean().default(true),
   destacado: z.boolean().default(false),
+  mostrarEnHome: z.boolean().default(false),
+  ordenDestacado: z.coerce.number().int().default(0),
+  etiquetaDestacada: z.string().optional().nullable(),
   enOferta: z.boolean().default(false),
   nuevo: z.boolean().default(false),
   tags: z.array(z.string()).default([]),
@@ -121,6 +128,20 @@ function asString(value: unknown, fallback = "") {
 
 function asStringArray(value: unknown) {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+}
+
+function dateOrNull(value: unknown) {
+  const text = asString(value).trim();
+  if (!text) return null;
+  const date = new Date(text);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function jsonList(value: unknown) {
+  if (Array.isArray(value)) return JSON.stringify(asStringArray(value));
+  const text = asString(value).trim();
+  if (!text) return "[]";
+  return JSON.stringify(text.split(",").map((item) => item.trim()).filter(Boolean));
 }
 
 const customerSelect = {
@@ -210,6 +231,20 @@ async function getOrCreateCart(userId: string) {
   });
 }
 
+async function commerceLines(items: Array<{ productId: string; cantidad: number; tipoPrecio?: string }>) {
+  const products = await prisma.product.findMany({
+    where: { id: { in: items.map((item) => item.productId) }, activo: true },
+  });
+  const byId = new Map(products.map((product) => [product.id, product]));
+  return items.flatMap((item) => {
+    const product = byId.get(item.productId);
+    if (!product) return [];
+    const quantity = Math.max(1, Number(item.cantidad || 1));
+    const price = item.tipoPrecio === "caja" && product.precioCaja ? product.precioCaja : product.precioUnitario;
+    return [{ productId: product.id, categoryId: product.categoryId, brandId: product.brandId, cantidad: quantity, subtotal: price * quantity }];
+  });
+}
+
 function productWhere(search: URLSearchParams, includeInactive = false): Prisma.ProductWhereInput {
   const q = (search.get("q") ?? search.get("search"))?.trim();
   const categoria = (search.get("categoria") ?? search.get("category"))?.trim();
@@ -233,6 +268,10 @@ function productWhere(search: URLSearchParams, includeInactive = false): Prisma.
   if (search.get("disponible") === "1") where.stock = { gt: 0 };
   if (search.get("oferta") === "1") where.enOferta = true;
   if (search.get("destacado") === "1") where.destacado = true;
+  if (search.get("home") === "1") {
+    delete where.destacado;
+    where.AND = [{ OR: [{ mostrarEnHome: true }, { destacado: true }] }];
+  }
   if (search.get("nuevo") === "1") where.nuevo = true;
   if (!Number.isNaN(precioMin) || !Number.isNaN(precioMax)) {
     where.precioUnitario = {
@@ -249,7 +288,9 @@ async function listProducts(request: NextRequest, includeInactive = false) {
   const limit = Math.min(500, Math.max(1, Number(search.get("limite") ?? "24")));
   const where = productWhere(search, includeInactive);
   const sort = search.get("sort") ?? search.get("orden") ?? "nombre";
-  const orderBy: Prisma.ProductOrderByWithRelationInput[] =
+  const orderBy: Prisma.ProductOrderByWithRelationInput[] = search.get("home") === "1"
+    ? [{ ordenDestacado: "asc" }, { vendidos: "desc" }, { createdAt: "desc" }]
+    :
     sort === "precio_asc" || sort === "price_asc"
       ? [{ precioUnitario: "asc" }]
       : sort === "precio_desc" || sort === "price_desc"
@@ -257,7 +298,7 @@ async function listProducts(request: NextRequest, includeInactive = false) {
         : sort === "recientes" || sort === "newest"
           ? [{ createdAt: "desc" }]
           : [{ destacado: "desc" }, { nombre: "asc" }];
-  const [total, products] = await Promise.all([
+  let [total, products] = await Promise.all([
     prisma.product.count({ where }),
     prisma.product.findMany({
       where,
@@ -267,6 +308,16 @@ async function listProducts(request: NextRequest, includeInactive = false) {
       take: limit,
     }),
   ]);
+  if (search.get("home") === "1" && products.length < limit) {
+    const fallback = await prisma.product.findMany({
+      where: { activo: true, id: { notIn: products.map((product) => product.id) } },
+      include: { category: true, brand: true },
+      orderBy: [{ vendidos: "desc" }, { createdAt: "desc" }],
+      take: limit - products.length,
+    });
+    products = [...products, ...fallback];
+    total = products.length;
+  }
   return ok({ success: true, data: { products }, products, pagination: { page, limit, total, pages: Math.max(1, Math.ceil(total / limit)) }, meta: { page, limit, total, pages: Math.max(1, Math.ceil(total / limit)) } });
 }
 
@@ -344,6 +395,28 @@ async function publicGet(request: NextRequest, segments: string[]) {
       orderBy: [{ orden: "asc" }, { createdAt: "desc" }],
     });
     return ok({ banners });
+  }
+
+  if (first === "notificaciones") {
+    const session = await requireCustomer(request);
+    const now = new Date();
+    const notifications = await prisma.notification.findMany({
+      where: {
+        activo: true,
+        OR: [
+          { publico: "todos" },
+          ...(session ? [{ publico: "registrados" }, { publico: "cliente", clienteId: session.id }] : []),
+        ],
+        AND: [
+          { OR: [{ fechaInicio: null }, { fechaInicio: { lte: now } }] },
+          { OR: [{ fechaFin: null }, { fechaFin: { gte: now } }] },
+        ],
+      },
+      orderBy: { createdAt: "desc" },
+      take: 10,
+    });
+    const user = session ? await prisma.user.findUnique({ where: { id: session.id }, select: { nombre: true } }) : null;
+    return ok({ notifications: notifications.map((item) => ({ ...item, mensaje: item.mensaje.replace(/\{nombre\}/g, user?.nombre || "cliente") })) });
   }
 
   if (first === "configuracion-publica") {
@@ -521,6 +594,20 @@ async function publicPost(request: NextRequest, segments: string[]) {
     return ok({ item });
   }
 
+  if (first === "cupones" && second === "validar") {
+    const session = await requireCustomer(request);
+    if (!session) return fail("Inicia sesion para aplicar beneficios", 401);
+    const body = await readJson(request);
+    const items = Array.isArray(body.items) ? body.items as Array<{ productId: string; cantidad: number; tipoPrecio?: string }> : [];
+    if (!items.length) return fail("El carrito esta vacio", 400);
+    const result = await evaluateCommerce({
+      userId: session.id,
+      couponCode: asString(body.couponCode),
+      lines: await commerceLines(items),
+    });
+    return ok({ benefit: result });
+  }
+
   if (first === "checkout") return checkout(request);
   if (first === "pedidos") return checkout(request);
 
@@ -619,6 +706,17 @@ async function checkout(request: NextRequest) {
   if (!orderItems.length) return fail("No hay productos disponibles en el pedido", 400);
 
   const subtotal = orderItems.reduce((sum, item) => sum + item.subtotal, 0);
+  const commerce = await evaluateCommerce({
+    userId: user.id,
+    couponCode: data.couponCode,
+    lines: orderItems.map((item) => ({
+      productId: item.product.id,
+      categoryId: item.product.categoryId,
+      brandId: item.product.brandId,
+      cantidad: item.cantidad,
+      subtotal: item.subtotal,
+    })),
+  });
   const numero = await nextOrderNumber();
   const contacto = data.contacto || data.nombre || user?.nombre || "Cliente";
   const partes = contacto.trim().split(/\s+/);
@@ -643,11 +741,16 @@ async function checkout(request: NextRequest) {
         entregaProvincia: data.provincia,
         entregaDepartamento: data.departamento,
         entregaReferencia: [data.metodoEntrega ? `Entrega: ${data.metodoEntrega}` : "", data.referencia ?? ""].filter(Boolean).join(" | ") || null,
+        entregaMapsUrl: data.mapsUrl || null,
+        metodoEntrega: data.metodoEntrega || "coordinada",
         estado: "nuevo",
         metodoPago: data.metodoPago,
         subtotal,
-        descuento: 0,
-        total: subtotal,
+        descuento: commerce.discount,
+        cuponCodigo: commerce.coupon?.code,
+        cuponDescripcion: commerce.coupon?.description,
+        bonificaciones: JSON.stringify(commerce.bonuses),
+        total: commerce.total,
         notasCliente: data.notas,
         items: {
           create: orderItems.map((item) => ({
@@ -670,6 +773,10 @@ async function checkout(request: NextRequest) {
 
     for (const item of orderItems) {
       await tx.product.update({ where: { id: item.product.id }, data: { vendidos: { increment: item.cantidad } } });
+    }
+    if (commerce.coupon) {
+      await tx.couponUsage.create({ data: { couponId: commerce.coupon.id, userId: user.id, orderId: created.id } });
+      await tx.coupon.update({ where: { id: commerce.coupon.id }, data: { cantidadUsos: { increment: 1 } } });
     }
     if (serverCart) await tx.cartItem.deleteMany({ where: { cartId: serverCart.id } });
     return created;
@@ -845,6 +952,10 @@ async function adminGet(request: NextRequest, segments: string[]) {
   if (first === "categorias") return ok({ categories: await prisma.category.findMany({ include: { _count: { select: { products: true } } }, orderBy: { orden: "asc" } }) });
   if (first === "marcas") return ok({ brands: await prisma.brand.findMany({ include: { _count: { select: { products: true } } }, orderBy: { orden: "asc" } }) });
   if (first === "banners") return ok({ banners: await prisma.banner.findMany({ orderBy: { orden: "asc" } }) });
+  if (first === "cupones") return ok({ coupons: await prisma.coupon.findMany({ orderBy: [{ prioridad: "desc" }, { createdAt: "desc" }] }) });
+  if (first === "bonificaciones") return ok({ bonuses: await prisma.bonus.findMany({ include: { cliente: { select: { id: true, nombre: true, apellido: true, nombreNegocio: true } } }, orderBy: { createdAt: "desc" } }) });
+  if (first === "notificaciones") return ok({ notifications: await prisma.notification.findMany({ include: { cliente: { select: { id: true, nombre: true, apellido: true } } }, orderBy: { createdAt: "desc" } }) });
+  if (first === "consolidado") return consolidatedReport(request, second);
   if (first === "clientes") {
     if (second) return customerDetail(second);
     return adminCustomers(request);
@@ -950,12 +1061,49 @@ async function adminPost(request: NextRequest, segments: string[]) {
         imagenDesktop: asString(body.imagenDesktop),
         imagenMobile: asString(body.imagenMobile),
         posicion: asString(body.posicion, "hero"),
+        tipo: asString(body.tipo, "principal_home"),
         colorTexto: asString(body.colorTexto, "light"),
         activo: body.activo !== false,
         orden: Number(body.orden ?? 0),
+        fechaInicio: dateOrNull(body.fechaInicio),
+        fechaFin: dateOrNull(body.fechaFin),
       },
     });
     return ok({ banner }, { status: 201 });
+  }
+
+  if (first === "cupones") {
+    const body = await readJson(request);
+    const coupon = await prisma.coupon.create({ data: {
+      codigo: asString(body.codigo).trim().toUpperCase(), descripcion: asString(body.descripcion), tipo: asString(body.tipo, "fijo"),
+      valor: Number(body.valor ?? 0), regaloNombre: asString(body.regaloNombre) || null, usoUnico: Boolean(body.usoUnico),
+      limitePorCliente: Math.max(1, Number(body.limitePorCliente ?? 1)), fechaInicio: dateOrNull(body.fechaInicio), fechaFin: dateOrNull(body.fechaFin),
+      montoMinimo: Number(body.montoMinimo ?? 0), categoriasAplicables: jsonList(body.categoriasAplicables), marcasAplicables: jsonList(body.marcasAplicables),
+      productosExcluidos: jsonList(body.productosExcluidos), activo: body.activo !== false, prioridad: Number(body.prioridad ?? 0),
+      cantidadMaximaUsos: body.cantidadMaximaUsos ? Number(body.cantidadMaximaUsos) : null,
+    } });
+    return ok({ coupon }, { status: 201 });
+  }
+
+  if (first === "bonificaciones") {
+    const body = await readJson(request);
+    const bonus = await prisma.bonus.create({ data: {
+      nombre: asString(body.nombre), codigoInterno: asString(body.codigoInterno) || null, descripcion: asString(body.descripcion) || null,
+      imagen: asString(body.imagen) || null, condicionTipo: asString(body.condicionTipo, "monto"), condicionValor: Number(body.condicionValor ?? 0),
+      categoryId: asString(body.categoryId) || null, brandId: asString(body.brandId) || null, clienteId: asString(body.clienteId) || null,
+      beneficio: asString(body.beneficio), activo: body.activo !== false, fechaInicio: dateOrNull(body.fechaInicio), fechaFin: dateOrNull(body.fechaFin),
+    } });
+    return ok({ bonus }, { status: 201 });
+  }
+
+  if (first === "notificaciones") {
+    const body = await readJson(request);
+    const notification = await prisma.notification.create({ data: {
+      titulo: asString(body.titulo), mensaje: asString(body.mensaje), tipo: asString(body.tipo, "aviso_home"),
+      fechaInicio: dateOrNull(body.fechaInicio), fechaFin: dateOrNull(body.fechaFin), publico: asString(body.publico, "todos"),
+      clienteId: asString(body.clienteId) || null, activo: body.activo !== false,
+    } });
+    return ok({ notification }, { status: 201 });
   }
 
   if (first === "pedidos" && second && third === "reenviar-email") {
@@ -1098,12 +1246,65 @@ async function adminPut(request: NextRequest, segments: string[]) {
         imagenDesktop: asString(body.imagenDesktop),
         imagenMobile: asString(body.imagenMobile),
         posicion: asString(body.posicion),
+        tipo: asString(body.tipo, "principal_home"),
         colorTexto: asString(body.colorTexto),
         activo: body.activo !== false,
         orden: Number(body.orden ?? 0),
+        fechaInicio: dateOrNull(body.fechaInicio),
+        fechaFin: dateOrNull(body.fechaFin),
       },
     });
     return ok({ banner });
+  }
+  if (first === "cupones" && second) {
+    const coupon = await prisma.coupon.update({ where: { id: second }, data: {
+      codigo: body.codigo === undefined ? undefined : asString(body.codigo).trim().toUpperCase(), descripcion: body.descripcion === undefined ? undefined : asString(body.descripcion),
+      tipo: body.tipo === undefined ? undefined : asString(body.tipo), valor: body.valor === undefined ? undefined : Number(body.valor),
+      regaloNombre: body.regaloNombre === undefined ? undefined : asString(body.regaloNombre) || null, usoUnico: body.usoUnico === undefined ? undefined : Boolean(body.usoUnico),
+      limitePorCliente: body.limitePorCliente === undefined ? undefined : Math.max(1, Number(body.limitePorCliente)), fechaInicio: body.fechaInicio === undefined ? undefined : dateOrNull(body.fechaInicio),
+      fechaFin: body.fechaFin === undefined ? undefined : dateOrNull(body.fechaFin), montoMinimo: body.montoMinimo === undefined ? undefined : Number(body.montoMinimo),
+      categoriasAplicables: body.categoriasAplicables === undefined ? undefined : jsonList(body.categoriasAplicables), marcasAplicables: body.marcasAplicables === undefined ? undefined : jsonList(body.marcasAplicables),
+      productosExcluidos: body.productosExcluidos === undefined ? undefined : jsonList(body.productosExcluidos), activo: body.activo === undefined ? undefined : Boolean(body.activo),
+      prioridad: body.prioridad === undefined ? undefined : Number(body.prioridad), cantidadMaximaUsos: body.cantidadMaximaUsos === undefined ? undefined : body.cantidadMaximaUsos ? Number(body.cantidadMaximaUsos) : null,
+    } });
+    return ok({ coupon });
+  }
+
+  if (first === "bonificaciones" && second) {
+    const bonus = await prisma.bonus.update({ where: { id: second }, data: {
+      nombre: body.nombre === undefined ? undefined : asString(body.nombre), codigoInterno: body.codigoInterno === undefined ? undefined : asString(body.codigoInterno) || null,
+      descripcion: body.descripcion === undefined ? undefined : asString(body.descripcion) || null, imagen: body.imagen === undefined ? undefined : asString(body.imagen) || null,
+      condicionTipo: body.condicionTipo === undefined ? undefined : asString(body.condicionTipo), condicionValor: body.condicionValor === undefined ? undefined : Number(body.condicionValor),
+      categoryId: body.categoryId === undefined ? undefined : asString(body.categoryId) || null, brandId: body.brandId === undefined ? undefined : asString(body.brandId) || null,
+      clienteId: body.clienteId === undefined ? undefined : asString(body.clienteId) || null, beneficio: body.beneficio === undefined ? undefined : asString(body.beneficio),
+      activo: body.activo === undefined ? undefined : Boolean(body.activo), fechaInicio: body.fechaInicio === undefined ? undefined : dateOrNull(body.fechaInicio), fechaFin: body.fechaFin === undefined ? undefined : dateOrNull(body.fechaFin),
+    } });
+    return ok({ bonus });
+  }
+
+  if (first === "notificaciones" && second) {
+    const notification = await prisma.notification.update({ where: { id: second }, data: {
+      titulo: body.titulo === undefined ? undefined : asString(body.titulo), mensaje: body.mensaje === undefined ? undefined : asString(body.mensaje),
+      tipo: body.tipo === undefined ? undefined : asString(body.tipo), fechaInicio: body.fechaInicio === undefined ? undefined : dateOrNull(body.fechaInicio),
+      fechaFin: body.fechaFin === undefined ? undefined : dateOrNull(body.fechaFin), publico: body.publico === undefined ? undefined : asString(body.publico),
+      clienteId: body.clienteId === undefined ? undefined : asString(body.clienteId) || null, activo: body.activo === undefined ? undefined : Boolean(body.activo),
+    } });
+    return ok({ notification });
+  }
+
+  if (first === "clientes" && second && third === "beneficios") {
+    const benefit = await prisma.customerBenefit.upsert({ where: { userId: second }, create: {
+      userId: second, cuponExclusivo: asString(body.cuponExclusivo) || null, productoGratis: asString(body.productoGratis) || null,
+      bonificacionEspecial: asString(body.bonificacionEspecial) || null, descuentoEspecial: Number(body.descuentoEspecial ?? 0),
+      productosExcluidos: jsonList(body.productosExcluidos), productosExclusivos: jsonList(body.productosExclusivos), notasInternas: asString(body.notasInternas) || null,
+      aplicarAutomatico: body.aplicarAutomatico !== false, activo: body.activo !== false,
+    }, update: {
+      cuponExclusivo: asString(body.cuponExclusivo) || null, productoGratis: asString(body.productoGratis) || null,
+      bonificacionEspecial: asString(body.bonificacionEspecial) || null, descuentoEspecial: Number(body.descuentoEspecial ?? 0),
+      productosExcluidos: jsonList(body.productosExcluidos), productosExclusivos: jsonList(body.productosExclusivos), notasInternas: asString(body.notasInternas) || null,
+      aplicarAutomatico: body.aplicarAutomatico !== false, activo: body.activo !== false,
+    } });
+    return ok({ benefit });
   }
 
   if (first === "clientes" && second) {
@@ -1156,6 +1357,18 @@ async function adminDelete(request: NextRequest, segments: string[]) {
   }
   if (first === "banners" && second) {
     await prisma.banner.delete({ where: { id: second } });
+    return ok({ ok: true });
+  }
+  if (first === "cupones" && second) {
+    await prisma.coupon.delete({ where: { id: second } });
+    return ok({ ok: true });
+  }
+  if (first === "bonificaciones" && second) {
+    await prisma.bonus.delete({ where: { id: second } });
+    return ok({ ok: true });
+  }
+  if (first === "notificaciones" && second) {
+    await prisma.notification.delete({ where: { id: second } });
     return ok({ ok: true });
   }
   return fail("Ruta admin no encontrada", 404);
@@ -1238,6 +1451,84 @@ async function dashboardReport() {
   };
 }
 
+function orderDateFilter(search: URLSearchParams) {
+  const period = search.get("periodo");
+  const month = search.get("mes");
+  const now = new Date();
+  let from: Date | undefined;
+  let to: Date | undefined;
+  if (period === "hoy") {
+    from = new Date(now); from.setHours(0, 0, 0, 0);
+    to = new Date(now); to.setHours(23, 59, 59, 999);
+  }
+  if (period === "semana") {
+    from = new Date(now); from.setDate(now.getDate() - 6); from.setHours(0, 0, 0, 0);
+    to = new Date(now); to.setHours(23, 59, 59, 999);
+  }
+  if (month && /^\d{4}-\d{2}$/.test(month)) {
+    const [year, monthNumber] = month.split("-").map(Number);
+    from = new Date(year, monthNumber - 1, 1, 0, 0, 0, 0);
+    to = new Date(year, monthNumber, 0, 23, 59, 59, 999);
+  }
+  const fromText = search.get("desde");
+  const toText = search.get("hasta");
+  if (fromText) {
+    from = new Date(`${fromText}T${search.get("horaDesde") || "00:00"}:00`);
+  }
+  if (toText) {
+    to = new Date(`${toText}T${search.get("horaHasta") || "23:59"}:59`);
+  }
+  return { from, to, filter: from || to ? { ...(from ? { gte: from } : {}), ...(to ? { lte: to } : {}) } : undefined };
+}
+
+async function consolidatedReport(request: NextRequest, format?: string) {
+  const search = request.nextUrl.searchParams;
+  const dates = orderDateFilter(search);
+  const orders = await prisma.order.findMany({
+    where: {
+      ...(dates.filter ? { createdAt: dates.filter } : {}),
+      ...(search.get("estado") ? { estado: search.get("estado") as string } : { estado: { not: "cancelado" } }),
+      ...(search.get("clienteId") ? { userId: search.get("clienteId") as string } : {}),
+    },
+    include: { items: { include: { product: { include: { category: true, brand: true } } } } },
+    orderBy: { createdAt: "asc" },
+  });
+  const grouped = new Map<string, ConsolidatedRow & { orderIds: Set<string> }>();
+  for (const order of orders) {
+    for (const item of order.items) {
+      const current = grouped.get(item.productId) ?? {
+        codigo: item.codigoInterno, producto: item.nombre, categoria: item.product.category.nombre,
+        marca: item.marca || item.product.brand?.nombre || "-", unidad: item.product.unidad,
+        cantidad: 0, precioReferencial: item.precio, subtotal: 0, pedidos: 0,
+        observacion: "", orderIds: new Set<string>(),
+      };
+      current.cantidad += item.cantidad;
+      current.subtotal += item.subtotal;
+      current.orderIds.add(order.id);
+      current.pedidos = current.orderIds.size;
+      current.observacion = item.product.stock < current.cantidad || item.product.stock <= item.product.stockMinimo ? "Stock bajo" : "";
+      grouped.set(item.productId, current);
+    }
+  }
+  const rows = Array.from(grouped.values()).map((entry) => ({
+    codigo: entry.codigo, producto: entry.producto, categoria: entry.categoria, marca: entry.marca,
+    unidad: entry.unidad, cantidad: entry.cantidad, precioReferencial: entry.precioReferencial,
+    subtotal: entry.subtotal, pedidos: entry.pedidos, observacion: entry.observacion,
+  })).sort((a, b) => b.cantidad - a.cantidad);
+  const fromLabel = dates.from?.toLocaleString("es-PE") || "Inicio";
+  const toLabel = dates.to?.toLocaleString("es-PE") || "Ahora";
+  const total = rows.reduce((sum, row) => sum + row.subtotal, 0);
+  if (format === "csv") {
+    const csv = toCsv(rows);
+    return new NextResponse(`\uFEFF${csv}`, { headers: { "Content-Type": "text/csv; charset=utf-8", "Content-Disposition": "attachment; filename=consolidado-carga-global-norte.csv" } });
+  }
+  if (format === "pdf") {
+    const pdf = await createConsolidatedPdf({ rows, from: fromLabel, to: toLabel, orderCount: orders.length, total });
+    return new NextResponse(new Uint8Array(pdf), { headers: { "Content-Type": "application/pdf", "Content-Disposition": "inline; filename=consolidado-carga-global-norte.pdf" } });
+  }
+  return ok({ rows, summary: { orders: orders.length, products: rows.length, total, from: fromLabel, to: toLabel } });
+}
+
 async function adminOrders(request: NextRequest) {
   const search = request.nextUrl.searchParams;
   const where: Prisma.OrderWhereInput = {};
@@ -1246,8 +1537,13 @@ async function adminOrders(request: NextRequest) {
   const q = search.get("q")?.trim();
   if (estado) where.estado = estado;
   if (metodoPago) where.metodoPago = metodoPago;
-  if (search.get("desde")) where.createdAt = { ...(where.createdAt as Prisma.DateTimeFilter), gte: new Date(search.get("desde") as string) };
-  if (search.get("hasta")) where.createdAt = { ...(where.createdAt as Prisma.DateTimeFilter), lte: new Date(search.get("hasta") as string) };
+  const dates = orderDateFilter(search);
+  if (dates.filter) where.createdAt = dates.filter;
+  if (search.get("metodoEntrega")) where.metodoEntrega = search.get("metodoEntrega") as string;
+  const totalMin = search.get("totalMin") ? Number(search.get("totalMin")) : Number.NaN;
+  const totalMax = search.get("totalMax") ? Number(search.get("totalMax")) : Number.NaN;
+  if (!Number.isNaN(totalMin) || !Number.isNaN(totalMax)) where.total = { ...(Number.isNaN(totalMin) ? {} : { gte: totalMin }), ...(Number.isNaN(totalMax) ? {} : { lte: totalMax }) };
+  if (search.get("clienteId")) where.userId = search.get("clienteId") as string;
   if (q) {
     where.OR = [
       { numero: { contains: q } },
@@ -1261,7 +1557,21 @@ async function adminOrders(request: NextRequest) {
     prisma.order.count({ where }),
     prisma.order.aggregate({ where, _sum: { total: true }, _avg: { total: true } }),
   ]);
-  return ok({ orders, stats: { totalVentas: sum._sum.total ?? 0, pedidos: total, ticketPromedio: sum._avg.total ?? 0, entregados: orders.filter((order) => order.estado === "entregado").length } });
+  const productTotals = new Map<string, { nombre: string; cantidad: number }>();
+  const customerTotals = new Map<string, { cliente: string; pedidos: number }>();
+  for (const order of orders) {
+    const customerKey = order.userId || order.clienteTelefono;
+    const customer = customerTotals.get(customerKey) ?? { cliente: order.clienteNegocio || `${order.clienteNombre} ${order.clienteApellido}`, pedidos: 0 };
+    customer.pedidos += 1; customerTotals.set(customerKey, customer);
+    for (const item of order.items) {
+      const product = productTotals.get(item.productId) ?? { nombre: item.nombre, cantidad: 0 };
+      product.cantidad += item.cantidad; productTotals.set(item.productId, product);
+    }
+  }
+  return ok({ orders, stats: { totalVentas: sum._sum.total ?? 0, pedidos: total, ticketPromedio: sum._avg.total ?? 0, entregados: orders.filter((order) => order.estado === "entregado").length }, month: {
+    topProducts: Array.from(productTotals.values()).sort((a, b) => b.cantidad - a.cantidad).slice(0, 5),
+    topCustomers: Array.from(customerTotals.values()).sort((a, b) => b.pedidos - a.pedidos).slice(0, 5),
+  } });
 }
 
 async function orderDetail(id: string) {
@@ -1327,7 +1637,7 @@ async function adminCustomers(request: NextRequest) {
 }
 
 async function customerDetail(id: string) {
-  const user = await prisma.user.findUnique({ where: { id }, include: { orders: { include: { items: true }, orderBy: { createdAt: "desc" } }, addresses: true } });
+  const user = await prisma.user.findUnique({ where: { id }, include: { orders: { include: { items: true }, orderBy: { createdAt: "desc" } }, addresses: true, benefit: true } });
   if (!user) return fail("Cliente no encontrado", 404);
   return ok({ user: { ...user, password: undefined, totalComprado: user.orders.reduce((sum, order) => sum + order.total, 0) } });
 }

@@ -17,6 +17,10 @@ import {
   Settings,
   ShoppingCart,
   Tags,
+  TicketPercent,
+  Gift,
+  BellRing,
+  Truck,
   UsersRound,
 } from "lucide-react";
 import {
@@ -49,10 +53,14 @@ const PLACEHOLDER_IMAGE = "/brand/global-norte-logo.jpg";
 const nav = [
   { href: "/admin", label: "Dashboard", icon: LayoutDashboard },
   { href: "/admin/pedidos", label: "Pedidos", icon: ShoppingCart },
+  { href: "/admin/consolidado", label: "Consolidado de carga", icon: Truck },
   { href: "/admin/productos", label: "Productos", icon: Boxes },
   { href: "/admin/categorias", label: "Categorias", icon: Tags },
   { href: "/admin/marcas", label: "Marcas", icon: Building2 },
   { href: "/admin/banners", label: "Banners", icon: ImageIcon },
+  { href: "/admin/cupones", label: "Cupones", icon: TicketPercent },
+  { href: "/admin/bonificaciones", label: "Bonificaciones", icon: Gift },
+  { href: "/admin/notificaciones", label: "Notificaciones", icon: BellRing },
   { href: "/admin/clientes", label: "Clientes", icon: UsersRound },
   { href: "/admin/reportes", label: "Reportes", icon: BarChart3 },
   { href: "/admin/configuracion", label: "Configuracion", icon: Settings },
@@ -72,6 +80,10 @@ const orderStateLabels: Record<string, string> = {
 
 function money(value: number) {
   return `S/ ${Number(value || 0).toFixed(2)}`;
+}
+
+function jsonValues(value?: string | null) {
+  try { const parsed = JSON.parse(value || "[]"); return Array.isArray(parsed) ? parsed.join(", ") : ""; } catch { return value || ""; }
 }
 
 function formData(event: FormEvent<HTMLFormElement>) {
@@ -147,6 +159,16 @@ export function AdminApp({ route }: { route: string[] }) {
       if (active === "categorias") setData(await api("/api/admin/categorias"));
       if (active === "marcas") setData(await api("/api/admin/marcas"));
       if (active === "banners") setData(await api("/api/admin/banners"));
+      if (active === "cupones") setData(await api("/api/admin/cupones"));
+      if (active === "bonificaciones") {
+        const [bonuses, customers] = await Promise.all([api<AnyRow>("/api/admin/bonificaciones"), api<AnyRow>("/api/admin/clientes")]);
+        setData({ ...bonuses, customers: customers.users ?? [] });
+      }
+      if (active === "notificaciones") {
+        const [notifications, customers] = await Promise.all([api<AnyRow>("/api/admin/notificaciones"), api<AnyRow>("/api/admin/clientes")]);
+        setData({ ...notifications, customers: customers.users ?? [] });
+      }
+      if (active === "consolidado") setData(await api("/api/admin/consolidado?periodo=hoy"));
       if (active === "clientes") setData(await api(detailId ? `/api/admin/clientes/${detailId}` : "/api/admin/clientes"));
       if (active === "reportes") {
         const [ventas, productos, categorias, inventario] = await Promise.all([
@@ -223,7 +245,11 @@ export function AdminApp({ route }: { route: string[] }) {
           {active === "categorias" ? <SimpleCrud kind="categorias" rows={data.categories ?? []} reload={loadData} /> : null}
           {active === "marcas" ? <SimpleCrud kind="marcas" rows={data.brands ?? []} reload={loadData} /> : null}
           {active === "banners" ? <Banners rows={data.banners ?? []} reload={loadData} /> : null}
-          {active === "clientes" ? <Customers data={data} detailId={detailId} /> : null}
+          {active === "cupones" ? <Coupons rows={data.coupons ?? []} reload={loadData} /> : null}
+          {active === "bonificaciones" ? <Bonuses rows={data.bonuses ?? []} customers={data.customers ?? []} reload={loadData} /> : null}
+          {active === "notificaciones" ? <Notifications rows={data.notifications ?? []} customers={data.customers ?? []} reload={loadData} /> : null}
+          {active === "consolidado" ? <Consolidated initial={data} /> : null}
+          {active === "clientes" ? <Customers data={data} detailId={detailId} reload={loadData} /> : null}
           {active === "reportes" ? <Reports data={data} /> : null}
           {active === "configuracion" ? <SettingsView rows={data.settings ?? []} reload={loadData} /> : null}
         </div>
@@ -435,29 +461,67 @@ function Orders({ data, detailId, reload }: { data: AnyRow; detailId?: string; r
           <div className="grid gap-4 md:grid-cols-2">
             <Info label="Cliente" value={`${order.clienteNombre} ${order.clienteApellido}`} />
             <Info label="Entrega" value={`${order.entregaDireccion}, ${order.entregaDistrito}`} />
+            <Info label="Metodo de entrega" value={order.metodoEntrega ?? "coordinada"} />
             <Info label="Telefono" value={order.clienteTelefono} />
             <Info label="Total" value={money(order.total)} />
           </div>
+          {order.entregaMapsUrl ? <a href={order.entregaMapsUrl} target="_blank" rel="noreferrer" className="mt-4 inline-flex rounded bg-[#D32F2F] px-4 py-2 text-sm font-bold text-white">Abrir ubicacion</a> : null}
         </Panel>
         <Panel title="Productos pedidos" help="Detalle calculado desde base de datos. El total es referencial hasta confirmacion interna.">
           <DataTable rows={order.items ?? []} columns={["codigoInterno", "nombre", "cantidad", "precio", "subtotal"]} />
           <div className="mt-4 text-right text-xl font-extrabold text-[#D32F2F]">Total {money(order.total)}</div>
+          {order.cuponCodigo ? <p className="mt-3 text-sm font-bold text-green-700">Cupon {order.cuponCodigo}: -{money(order.descuento)}</p> : null}
+          {JSON.parse(order.bonificaciones || "[]").map((bonus: AnyRow, index: number) => <p key={`${bonus.name}-${index}`} className="mt-2 text-sm font-bold text-amber-700">Bonificacion / regalo: {bonus.name} (S/ 0.00)</p>)}
           {order.notasCliente ? <p className="mt-3 text-sm text-neutral-600">Observaciones: {order.notasCliente}</p> : null}
         </Panel>
       </div>
     );
   }
+  return <AdvancedOrders initial={data} />;
+}
+
+function AdvancedOrders({ initial }: { initial: AnyRow }) {
+  const [result, setResult] = useState(initial);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => setResult(initial), [initial]);
+  async function filter(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setBusy(true);
+    try {
+      const params = new URLSearchParams(formData(event) as Record<string, string>);
+      Array.from(params.entries()).forEach(([key, value]) => { if (!value) params.delete(key); });
+      setResult(await api(`/api/admin/pedidos?${params.toString()}`));
+    } catch (error) { toast.error(error instanceof Error ? error.message : "No se pudo filtrar"); }
+    finally { setBusy(false); }
+  }
   return (
     <div className="grid gap-4">
       <div className="grid gap-4 md:grid-cols-4">
-        <Kpi label="Total" value={money(data.stats?.totalVentas ?? 0)} />
-        <Kpi label="Pedidos" value={data.stats?.pedidos ?? 0} />
-        <Kpi label="Ticket promedio" value={money(data.stats?.ticketPromedio ?? 0)} />
-        <Kpi label="Entregados" value={data.stats?.entregados ?? 0} />
+        <Kpi label="Total" value={money(result.stats?.totalVentas ?? 0)} />
+        <Kpi label="Pedidos" value={result.stats?.pedidos ?? 0} />
+        <Kpi label="Ticket promedio" value={money(result.stats?.ticketPromedio ?? 0)} />
+        <Kpi label="Entregados" value={result.stats?.entregados ?? 0} />
       </div>
-      <Panel title="Pedidos" help="Listado operativo para buscar pedidos, revisar estados y abrir cada detalle.">
-        <OrdersTable orders={data.orders ?? []} />
+      <Panel title="Filtros avanzados" help="Combina periodo, fecha, hora, cliente, entrega, pago y rango de total.">
+        <form onSubmit={filter} className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+          <select name="periodo" className="h-10 rounded border border-neutral-300 bg-white px-3 text-sm"><option value="">Periodo</option><option value="hoy">Hoy</option><option value="semana">Ultimos 7 dias</option></select>
+          <input name="mes" type="month" className="h-10 rounded border border-neutral-300 px-3 text-sm" />
+          <input name="desde" type="date" className="h-10 rounded border border-neutral-300 px-3 text-sm" />
+          <input name="hasta" type="date" className="h-10 rounded border border-neutral-300 px-3 text-sm" />
+          <div className="grid grid-cols-2 gap-2"><input name="horaDesde" type="time" className="h-10 min-w-0 rounded border border-neutral-300 px-2 text-sm" /><input name="horaHasta" type="time" className="h-10 min-w-0 rounded border border-neutral-300 px-2 text-sm" /></div>
+          <input name="q" placeholder="Cliente o telefono" className="h-10 rounded border border-neutral-300 px-3 text-sm" />
+          <select name="estado" className="h-10 rounded border border-neutral-300 bg-white px-3 text-sm"><option value="">Estado</option>{orderStates.map((state) => <option key={state} value={state}>{orderStateLabels[state]}</option>)}</select>
+          <select name="metodoEntrega" className="h-10 rounded border border-neutral-300 bg-white px-3 text-sm"><option value="">Entrega</option><option value="coordinada">Coordinada</option><option value="recojo">Recojo</option></select>
+          <select name="metodoPago" className="h-10 rounded border border-neutral-300 bg-white px-3 text-sm"><option value="">Pago</option><option value="efectivo">Efectivo</option><option value="transferencia">Transferencia</option><option value="yape">Yape</option><option value="plin">Plin</option></select>
+          <div className="grid grid-cols-2 gap-2"><input name="totalMin" type="number" step="0.01" placeholder="Total min." className="h-10 min-w-0 rounded border border-neutral-300 px-2 text-sm" /><input name="totalMax" type="number" step="0.01" placeholder="Total max." className="h-10 min-w-0 rounded border border-neutral-300 px-2 text-sm" /></div>
+          <button disabled={busy} className="h-10 rounded bg-[#D32F2F] px-4 text-sm font-bold text-white disabled:opacity-60">{busy ? "Filtrando" : "Aplicar filtros"}</button>
+        </form>
       </Panel>
+      <div className="grid gap-4 lg:grid-cols-2">
+        <Panel title="Productos mas pedidos"><DataTable rows={result.month?.topProducts ?? []} columns={["nombre", "cantidad"]} /></Panel>
+        <Panel title="Clientes con mas pedidos"><DataTable rows={result.month?.topCustomers ?? []} columns={["cliente", "pedidos"]} /></Panel>
+      </div>
+      <Panel title="Pedidos" help="Listado operativo filtrado."><OrdersTable orders={result.orders ?? []} /></Panel>
     </div>
   );
 }
@@ -551,6 +615,9 @@ function Products({ data, categories, brands, reload }: { data: AnyRow; categori
       unidad: raw.unidad || "unidad",
       activo: true,
       destacado: Boolean(raw.destacado),
+      mostrarEnHome: Boolean(raw.mostrarEnHome),
+      ordenDestacado: Number(raw.ordenDestacado ?? 0),
+      etiquetaDestacada: raw.etiquetaDestacada || null,
       enOferta: Boolean(raw.enOferta),
       nuevo: Boolean(raw.nuevo),
       tags: String(raw.nombre ?? "").toLowerCase().split(/\s+/).slice(0, 8),
@@ -597,6 +664,10 @@ function Products({ data, categories, brands, reload }: { data: AnyRow; categori
           <Field name="stock" label="Stock" help="Cantidad disponible referencial. El pedido no descuenta stock automaticamente." type="number" defaultValue={editing?.stock ?? 0} />
           <Field name="stockMinimo" label="Stock minimo" help="Umbral para alertar stock bajo." type="number" defaultValue={editing?.stockMinimo ?? 1} />
           <Field name="unidad" label="Unidad" defaultValue={editing?.unidad ?? "unidad"} />
+          <Field name="ordenDestacado" label="Orden en home" type="number" defaultValue={editing?.ordenDestacado ?? 0} />
+          <label className="grid gap-1 text-sm font-semibold text-neutral-700">Etiqueta destacada
+            <select name="etiquetaDestacada" defaultValue={editing?.etiquetaDestacada ?? ""} className="h-10 rounded border border-neutral-300 bg-white px-3 text-sm font-normal"><option value="">Sin etiqueta</option><option value="oferta">Oferta</option><option value="nuevo">Nuevo</option><option value="recomendado">Recomendado</option><option value="mas_vendido">Mas vendido</option></select>
+          </label>
           <label className="grid gap-1 text-sm font-semibold text-neutral-700">
             Imagen principal
             <input name="imagenPrincipal" value={imageValue} onChange={(event) => setImageValue(event.target.value)} className="h-10 rounded border border-neutral-300 px-3 text-sm font-normal outline-none focus:border-[#D32F2F]" />
@@ -614,7 +685,11 @@ function Products({ data, categories, brands, reload }: { data: AnyRow; categori
               }
             }} className="h-10 rounded border border-neutral-300 px-3 py-2 text-xs" />
           </label>
-          <div className="flex gap-2 md:col-span-4">
+          <div className="flex flex-wrap items-center gap-4 md:col-span-4">
+            <label className="inline-flex items-center gap-2 text-sm font-bold"><input name="destacado" type="checkbox" defaultChecked={editing?.destacado ?? false} /> Destacado</label>
+            <label className="inline-flex items-center gap-2 text-sm font-bold"><input name="mostrarEnHome" type="checkbox" defaultChecked={editing?.mostrarEnHome ?? false} /> Mostrar en home</label>
+            <label className="inline-flex items-center gap-2 text-sm font-bold"><input name="enOferta" type="checkbox" defaultChecked={editing?.enOferta ?? false} /> Oferta</label>
+            <label className="inline-flex items-center gap-2 text-sm font-bold"><input name="nuevo" type="checkbox" defaultChecked={editing?.nuevo ?? false} /> Nuevo</label>
             <button className="h-10 rounded bg-[#D32F2F] px-4 text-sm font-bold text-white">Guardar producto</button>
             {editing ? (
               <button type="button" onClick={() => setEditing(null)} className="h-10 rounded border border-neutral-300 px-4 text-sm font-bold">
@@ -632,7 +707,7 @@ function Products({ data, categories, brands, reload }: { data: AnyRow; categori
         </div>
         <DataTable
           rows={visibleProducts}
-          columns={["codigoInterno", "nombre", "precioUnitario", "precioCaja", "stock", "activo"]}
+          columns={["codigoInterno", "nombre", "precioUnitario", "stock", "destacado", "mostrarEnHome", "ordenDestacado"]}
           renderActions={(row) => (
             <div className="flex gap-2">
               <button onClick={() => setEditing(row)} className="rounded border border-neutral-300 px-2 py-1 text-xs font-bold">Editar</button>
@@ -714,6 +789,7 @@ function SimpleCrud({ kind, rows, reload }: { kind: "categorias" | "marcas"; row
 
 function Banners({ rows, reload }: { rows: AnyRow[]; reload: () => void }) {
   const [bannerImage, setBannerImage] = useState("");
+  const [bannerMobile, setBannerMobile] = useState("");
   const [editing, setEditing] = useState<AnyRow | null>(null);
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -728,16 +804,20 @@ function Banners({ rows, reload }: { rows: AnyRow[]; reload: () => void }) {
         ctaTexto: raw.ctaTexto,
         ctaLink: raw.ctaLink,
         imagenDesktop: bannerImage || raw.imagenDesktop || editing?.imagenDesktop || PLACEHOLDER_IMAGE,
-        imagenMobile: editing?.imagenMobile || null,
+        imagenMobile: bannerMobile || raw.imagenMobile || editing?.imagenMobile || null,
         posicion: raw.posicion || "hero",
+        tipo: raw.tipo || "principal_home",
         colorTexto: editing?.colorTexto || "light",
         activo: editing?.activo ?? true,
         orden: Number(raw.orden ?? editing?.orden ?? 0),
+        fechaInicio: raw.fechaInicio || null,
+        fechaFin: raw.fechaFin || null,
       }),
     });
     toast.success(editing ? "Banner actualizado" : "Banner creado");
     setEditing(null);
     setBannerImage("");
+    setBannerMobile("");
     form.reset();
     reload();
   }
@@ -781,20 +861,31 @@ function Banners({ rows, reload }: { rows: AnyRow[]; reload: () => void }) {
             }} className="h-10 rounded border border-neutral-300 px-3 py-2 text-xs" />
           </label>
           <Field name="posicion" label="Posicion" defaultValue={editing?.posicion ?? "hero"} />
+          <label className="grid gap-1 text-sm font-semibold text-neutral-700">Tipo
+            <select name="tipo" defaultValue={editing?.tipo ?? "principal_home"} className="h-10 rounded border border-neutral-300 bg-white px-3 text-sm"><option value="principal_home">Principal home</option><option value="catalogo">Catalogo</option><option value="carrito">Carrito</option><option value="modal">Modal emergente</option><option value="festiva">Fecha festiva</option></select>
+          </label>
           <Field name="orden" label="Orden" type="number" defaultValue={editing?.orden ?? 0} />
+          <Field name="fechaInicio" label="Inicio programado" type="datetime-local" defaultValue={editing?.fechaInicio ? String(editing.fechaInicio).slice(0, 16) : ""} />
+          <Field name="fechaFin" label="Fin programado" type="datetime-local" defaultValue={editing?.fechaFin ? String(editing.fechaFin).slice(0, 16) : ""} />
+          <label className="grid gap-1 text-sm font-semibold text-neutral-700">Imagen movil
+            <input name="imagenMobile" value={bannerMobile} onChange={(event) => setBannerMobile(event.target.value)} className="h-10 rounded border border-neutral-300 px-3 text-sm" />
+          </label>
+          <label className="grid gap-1 text-sm font-semibold text-neutral-700">Cargar archivo movil
+            <input type="file" accept="image/png,image/jpeg,image/webp" onChange={async (event) => { const file = event.target.files?.[0]; if (!file) return; try { setBannerMobile(await uploadAsset(file, "banners")); toast.success("Imagen movil subida"); } catch (error) { toast.error(error instanceof Error ? error.message : "No se pudo subir"); } }} className="h-10 rounded border border-neutral-300 px-3 py-2 text-xs" />
+          </label>
           <div className="flex gap-2 self-end md:col-span-2">
             <button className="h-10 rounded bg-[#D32F2F] px-4 text-sm font-bold text-white">Guardar</button>
-            {editing ? <button type="button" onClick={() => { setEditing(null); setBannerImage(""); }} className="h-10 rounded border border-neutral-300 px-4 text-sm font-bold">Cancelar</button> : null}
+            {editing ? <button type="button" onClick={() => { setEditing(null); setBannerImage(""); setBannerMobile(""); }} className="h-10 rounded border border-neutral-300 px-4 text-sm font-bold">Cancelar</button> : null}
           </div>
         </form>
       </Panel>
       <Panel title="Banners" help="Activa, desactiva o elimina banners guardados. Evita imagenes pesadas para mejorar rendimiento movil.">
         <DataTable
           rows={rows}
-          columns={["titulo", "posicion", "activo", "clics", "orden"]}
+          columns={["titulo", "tipo", "posicion", "fechaInicio", "fechaFin", "activo", "orden"]}
           renderActions={(row) => (
             <div className="flex gap-2">
-              <button onClick={() => { setEditing(row); setBannerImage(row.imagenDesktop ?? ""); }} className="rounded border border-neutral-300 px-2 py-1 text-xs font-bold">Editar</button>
+              <button onClick={() => { setEditing(row); setBannerImage(row.imagenDesktop ?? ""); setBannerMobile(row.imagenMobile ?? ""); }} className="rounded border border-neutral-300 px-2 py-1 text-xs font-bold">Editar</button>
               <button onClick={() => toggle(row)} className="rounded border border-neutral-300 px-2 py-1 text-xs font-bold">{row.activo ? "Desactivar" : "Activar"}</button>
               <button onClick={() => remove(row)} className="rounded border border-red-200 px-2 py-1 text-xs font-bold text-red-600">Eliminar</button>
             </div>
@@ -805,7 +896,7 @@ function Banners({ rows, reload }: { rows: AnyRow[]; reload: () => void }) {
   );
 }
 
-function Customers({ data, detailId }: { data: AnyRow; detailId?: string }) {
+function Customers({ data, detailId, reload }: { data: AnyRow; detailId?: string; reload: () => void }) {
   if (detailId && data.user) {
     const user = data.user;
     return (
@@ -817,6 +908,20 @@ function Customers({ data, detailId }: { data: AnyRow; detailId?: string }) {
             <Info label="Negocio" value={user.nombreNegocio ?? "-"} />
             <Info label="Total comprado" value={money(user.totalComprado ?? 0)} />
           </div>
+        </Panel>
+        <Panel title="Beneficios / excepciones" help="Configura condiciones exclusivas para este cliente. El backend las valida al registrar el pedido.">
+          <form onSubmit={async (event) => { event.preventDefault(); const raw = formData(event); await api(`/api/admin/clientes/${user.id}/beneficios`, { method: "PUT", body: JSON.stringify({ ...raw, descuentoEspecial: Number(raw.descuentoEspecial ?? 0), aplicarAutomatico: Boolean(raw.aplicarAutomatico), activo: Boolean(raw.activo) }) }); toast.success("Beneficios guardados"); reload(); }} className="grid gap-3 md:grid-cols-3">
+            <Field name="cuponExclusivo" label="Cupon exclusivo" defaultValue={user.benefit?.cuponExclusivo ?? ""} />
+            <Field name="productoGratis" label="Producto gratis" defaultValue={user.benefit?.productoGratis ?? ""} />
+            <Field name="bonificacionEspecial" label="Bonificacion especial" defaultValue={user.benefit?.bonificacionEspecial ?? ""} />
+            <Field name="descuentoEspecial" label="Descuento especial %" type="number" step="0.01" defaultValue={user.benefit?.descuentoEspecial ?? 0} />
+            <Field name="productosExcluidos" label="Productos excluidos (IDs)" defaultValue={jsonValues(user.benefit?.productosExcluidos)} />
+            <Field name="productosExclusivos" label="Productos exclusivos (IDs)" defaultValue={jsonValues(user.benefit?.productosExclusivos)} />
+            <Field name="notasInternas" label="Notas internas" defaultValue={user.benefit?.notasInternas ?? ""} />
+            <label className="inline-flex items-center gap-2 text-sm font-bold"><input type="checkbox" name="aplicarAutomatico" defaultChecked={user.benefit?.aplicarAutomatico ?? true} /> Aplicar automaticamente</label>
+            <label className="inline-flex items-center gap-2 text-sm font-bold"><input type="checkbox" name="activo" defaultChecked={user.benefit?.activo ?? true} /> Activo</label>
+            <button className="h-10 rounded bg-[#D32F2F] px-4 text-sm font-bold text-white md:col-span-3 md:w-fit">Guardar beneficios</button>
+          </form>
         </Panel>
         <Panel title="Pedidos">
           <OrdersTable orders={user.orders ?? []} />
@@ -839,6 +944,75 @@ function Customers({ data, detailId }: { data: AnyRow; detailId?: string }) {
       <DataTable rows={rows} columns={["nombre", "email", "telefono", "negocio", "pedidos", "totalComprado", "estado"]} linkPrefix="/admin/clientes" />
     </Panel>
   );
+}
+
+function Coupons({ rows, reload }: { rows: AnyRow[]; reload: () => void }) {
+  const [editing, setEditing] = useState<AnyRow | null>(null);
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault(); const form = event.currentTarget; const raw = formData(event);
+    await api(editing ? `/api/admin/cupones/${editing.id}` : "/api/admin/cupones", { method: editing ? "PUT" : "POST", body: JSON.stringify({
+      ...raw, codigo: String(raw.codigo).toUpperCase(), valor: Number(raw.valor ?? 0), montoMinimo: Number(raw.montoMinimo ?? 0),
+      limitePorCliente: Number(raw.limitePorCliente ?? 1), prioridad: Number(raw.prioridad ?? 0), cantidadMaximaUsos: raw.cantidadMaximaUsos ? Number(raw.cantidadMaximaUsos) : null,
+      usoUnico: Boolean(raw.usoUnico), activo: Boolean(raw.activo),
+    }) });
+    toast.success(editing ? "Cupon actualizado" : "Cupon creado"); setEditing(null); form.reset(); reload();
+  }
+  async function remove(row: AnyRow) { if (!window.confirm(`Eliminar cupon ${row.codigo}?`)) return; await api(`/api/admin/cupones/${row.id}`, { method: "DELETE" }); toast.success("Cupon eliminado"); reload(); }
+  return <div className="grid gap-4">
+    <Panel title={editing ? "Editar cupon" : "Nuevo cupon"} help="La validacion de fechas, monto, productos y usos se realiza nuevamente en el backend al registrar el pedido.">
+      <form key={editing?.id ?? "new"} onSubmit={submit} className="grid gap-3 md:grid-cols-4">
+        <Field name="codigo" label="Codigo" defaultValue={editing?.codigo ?? ""} required /><Field name="descripcion" label="Descripcion" defaultValue={editing?.descripcion ?? ""} />
+        <label className="grid gap-1 text-sm font-semibold">Tipo<select name="tipo" defaultValue={editing?.tipo ?? "fijo"} className="h-10 rounded border border-neutral-300 bg-white px-3"><option value="fijo">Descuento fijo</option><option value="porcentaje">Porcentaje</option><option value="regalo">Regalo</option><option value="beneficio">Envio / beneficio</option></select></label>
+        <Field name="valor" label="Monto o porcentaje" type="number" step="0.01" defaultValue={editing?.valor ?? 0} /><Field name="regaloNombre" label="Regalo / beneficio" defaultValue={editing?.regaloNombre ?? ""} />
+        <Field name="montoMinimo" label="Carrito minimo" type="number" step="0.01" defaultValue={editing?.montoMinimo ?? 0} /><Field name="limitePorCliente" label="Limite por cliente" type="number" defaultValue={editing?.limitePorCliente ?? 1} /><Field name="cantidadMaximaUsos" label="Maximo usos global" type="number" defaultValue={editing?.cantidadMaximaUsos ?? ""} /><Field name="prioridad" label="Prioridad" type="number" defaultValue={editing?.prioridad ?? 0} />
+        <Field name="fechaInicio" label="Inicio" type="datetime-local" defaultValue={editing?.fechaInicio ? String(editing.fechaInicio).slice(0, 16) : ""} /><Field name="fechaFin" label="Fin" type="datetime-local" defaultValue={editing?.fechaFin ? String(editing.fechaFin).slice(0, 16) : ""} />
+        <Field name="categoriasAplicables" label="Categorias (IDs separados por coma)" defaultValue={jsonValues(editing?.categoriasAplicables)} /><Field name="marcasAplicables" label="Marcas (IDs separados por coma)" defaultValue={jsonValues(editing?.marcasAplicables)} /><Field name="productosExcluidos" label="Productos excluidos (IDs)" defaultValue={jsonValues(editing?.productosExcluidos)} />
+        <div className="flex flex-wrap items-center gap-4 md:col-span-4"><label className="inline-flex gap-2 text-sm font-bold"><input name="usoUnico" type="checkbox" defaultChecked={editing?.usoUnico ?? false} /> Uso unico</label><label className="inline-flex gap-2 text-sm font-bold"><input name="activo" type="checkbox" defaultChecked={editing?.activo ?? true} /> Activo</label><button className="h-10 rounded bg-[#D32F2F] px-4 text-sm font-bold text-white">Guardar cupon</button>{editing ? <button type="button" onClick={() => setEditing(null)} className="h-10 rounded border px-4 text-sm font-bold">Cancelar</button> : null}</div>
+      </form>
+    </Panel>
+    <Panel title="Cupones"><DataTable rows={rows} columns={["codigo", "tipo", "valor", "montoMinimo", "cantidadUsos", "activo", "fechaFin"]} renderActions={(row) => <div className="flex gap-2"><button onClick={() => setEditing(row)} className="rounded border px-2 py-1 text-xs font-bold">Editar</button><button onClick={() => remove(row)} className="rounded border border-red-200 px-2 py-1 text-xs font-bold text-red-600">Eliminar</button></div>} /></Panel>
+  </div>;
+}
+
+function Bonuses({ rows, customers, reload }: { rows: AnyRow[]; customers: AnyRow[]; reload: () => void }) {
+  const [editing, setEditing] = useState<AnyRow | null>(null);
+  async function submit(event: FormEvent<HTMLFormElement>) { event.preventDefault(); const form = event.currentTarget; const raw = formData(event); await api(editing ? `/api/admin/bonificaciones/${editing.id}` : "/api/admin/bonificaciones", { method: editing ? "PUT" : "POST", body: JSON.stringify({ ...raw, condicionValor: Number(raw.condicionValor ?? 0), activo: Boolean(raw.activo) }) }); toast.success(editing ? "Bonificacion actualizada" : "Bonificacion creada"); setEditing(null); form.reset(); reload(); }
+  async function remove(row: AnyRow) { if (!window.confirm(`Eliminar ${row.nombre}?`)) return; await api(`/api/admin/bonificaciones/${row.id}`, { method: "DELETE" }); reload(); }
+  return <div className="grid gap-4"><Panel title={editing ? "Editar bonificacion" : "Nueva bonificacion"}>
+    <form key={editing?.id ?? "new"} onSubmit={submit} className="grid gap-3 md:grid-cols-4">
+      <Field name="nombre" label="Nombre" defaultValue={editing?.nombre ?? ""} required /><Field name="codigoInterno" label="Codigo interno" defaultValue={editing?.codigoInterno ?? ""} /><Field name="descripcion" label="Descripcion" defaultValue={editing?.descripcion ?? ""} /><Field name="beneficio" label="Producto gratis / beneficio" defaultValue={editing?.beneficio ?? ""} required />
+      <label className="grid gap-1 text-sm font-semibold">Condicion<select name="condicionTipo" defaultValue={editing?.condicionTipo ?? "monto"} className="h-10 rounded border bg-white px-3"><option value="monto">Desde monto</option><option value="cantidad">Desde cantidad</option><option value="categoria">Por categoria</option><option value="marca">Por marca</option><option value="cliente">Cliente especifico</option><option value="fecha">Por fecha</option></select></label>
+      <Field name="condicionValor" label="Valor condicion" type="number" step="0.01" defaultValue={editing?.condicionValor ?? 0} /><Field name="categoryId" label="ID categoria" defaultValue={editing?.categoryId ?? ""} /><Field name="brandId" label="ID marca" defaultValue={editing?.brandId ?? ""} />
+      <label className="grid gap-1 text-sm font-semibold">Cliente<select name="clienteId" defaultValue={editing?.clienteId ?? ""} className="h-10 rounded border bg-white px-3"><option value="">Todos</option>{customers.map((user) => <option key={user.id} value={user.id}>{user.nombreNegocio || `${user.nombre} ${user.apellido}`}</option>)}</select></label>
+      <Field name="fechaInicio" label="Inicio" type="datetime-local" defaultValue={editing?.fechaInicio ? String(editing.fechaInicio).slice(0, 16) : ""} /><Field name="fechaFin" label="Fin" type="datetime-local" defaultValue={editing?.fechaFin ? String(editing.fechaFin).slice(0, 16) : ""} /><Field name="imagen" label="Imagen opcional" defaultValue={editing?.imagen ?? ""} />
+      <div className="flex items-center gap-4 md:col-span-4"><label className="inline-flex gap-2 text-sm font-bold"><input name="activo" type="checkbox" defaultChecked={editing?.activo ?? true} /> Activa</label><button className="h-10 rounded bg-[#D32F2F] px-4 text-sm font-bold text-white">Guardar</button>{editing ? <button type="button" onClick={() => setEditing(null)} className="h-10 rounded border px-4 text-sm font-bold">Cancelar</button> : null}</div>
+    </form></Panel><Panel title="Bonificaciones"><DataTable rows={rows} columns={["nombre", "condicionTipo", "condicionValor", "beneficio", "activo", "fechaFin"]} renderActions={(row) => <div className="flex gap-2"><button onClick={() => setEditing(row)} className="rounded border px-2 py-1 text-xs font-bold">Editar</button><button onClick={() => remove(row)} className="rounded border border-red-200 px-2 py-1 text-xs font-bold text-red-600">Eliminar</button></div>} /></Panel></div>;
+}
+
+function Notifications({ rows, customers, reload }: { rows: AnyRow[]; customers: AnyRow[]; reload: () => void }) {
+  const [editing, setEditing] = useState<AnyRow | null>(null);
+  async function submit(event: FormEvent<HTMLFormElement>) { event.preventDefault(); const form = event.currentTarget; const raw = formData(event); await api(editing ? `/api/admin/notificaciones/${editing.id}` : "/api/admin/notificaciones", { method: editing ? "PUT" : "POST", body: JSON.stringify({ ...raw, activo: Boolean(raw.activo) }) }); toast.success(editing ? "Notificacion actualizada" : "Notificacion creada"); setEditing(null); form.reset(); reload(); }
+  async function remove(row: AnyRow) { if (!window.confirm(`Eliminar ${row.titulo}?`)) return; await api(`/api/admin/notificaciones/${row.id}`, { method: "DELETE" }); reload(); }
+  return <div className="grid gap-4"><Panel title={editing ? "Editar notificacion" : "Nueva notificacion"}>
+    <form key={editing?.id ?? "new"} onSubmit={submit} className="grid gap-3 md:grid-cols-4"><Field name="titulo" label="Titulo" defaultValue={editing?.titulo ?? ""} required /><Field name="mensaje" label="Mensaje (usa {nombre})" defaultValue={editing?.mensaje ?? ""} required />
+      <label className="grid gap-1 text-sm font-semibold">Tipo<select name="tipo" defaultValue={editing?.tipo ?? "aviso_home"} className="h-10 rounded border bg-white px-3"><option value="popup">Popup</option><option value="banner">Banner pequeno</option><option value="aviso_carrito">Aviso en carrito</option><option value="aviso_home">Aviso en home</option></select></label>
+      <label className="grid gap-1 text-sm font-semibold">Publico<select name="publico" defaultValue={editing?.publico ?? "todos"} className="h-10 rounded border bg-white px-3"><option value="todos">Todos</option><option value="registrados">Registrados</option><option value="cliente">Cliente especifico</option></select></label>
+      <label className="grid gap-1 text-sm font-semibold">Cliente<select name="clienteId" defaultValue={editing?.clienteId ?? ""} className="h-10 rounded border bg-white px-3"><option value="">Ninguno</option>{customers.map((user) => <option key={user.id} value={user.id}>{user.nombreNegocio || `${user.nombre} ${user.apellido}`}</option>)}</select></label>
+      <Field name="fechaInicio" label="Inicio" type="datetime-local" defaultValue={editing?.fechaInicio ? String(editing.fechaInicio).slice(0, 16) : ""} /><Field name="fechaFin" label="Fin" type="datetime-local" defaultValue={editing?.fechaFin ? String(editing.fechaFin).slice(0, 16) : ""} />
+      <div className="flex items-center gap-4 md:col-span-4"><label className="inline-flex gap-2 text-sm font-bold"><input name="activo" type="checkbox" defaultChecked={editing?.activo ?? true} /> Activa</label><button className="h-10 rounded bg-[#D32F2F] px-4 text-sm font-bold text-white">Guardar</button>{editing ? <button type="button" onClick={() => setEditing(null)} className="h-10 rounded border px-4 text-sm font-bold">Cancelar</button> : null}</div>
+    </form></Panel><Panel title="Notificaciones"><DataTable rows={rows} columns={["titulo", "tipo", "publico", "fechaInicio", "fechaFin", "activo"]} renderActions={(row) => <div className="flex gap-2"><button onClick={() => setEditing(row)} className="rounded border px-2 py-1 text-xs font-bold">Editar</button><button onClick={() => remove(row)} className="rounded border border-red-200 px-2 py-1 text-xs font-bold text-red-600">Eliminar</button></div>} /></Panel></div>;
+}
+
+function Consolidated({ initial }: { initial: AnyRow }) {
+  const [data, setData] = useState(initial);
+  const [query, setQuery] = useState("periodo=hoy");
+  const [busy, setBusy] = useState(false);
+  useEffect(() => setData(initial), [initial]);
+  async function filter(event: FormEvent<HTMLFormElement>) { event.preventDefault(); const params = new URLSearchParams(formData(event) as Record<string, string>); Array.from(params.entries()).forEach(([key, value]) => { if (!value) params.delete(key); }); const next = params.toString(); setQuery(next); setBusy(true); try { setData(await api(`/api/admin/consolidado?${next}`)); } catch (error) { toast.error(error instanceof Error ? error.message : "No se pudo generar"); } finally { setBusy(false); } }
+  return <div className="grid gap-4"><Panel title="Consolidado de carga" help="Suma los productos de todos los pedidos filtrados para preparar y cargar el camion.">
+    <form onSubmit={filter} className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5"><select name="periodo" defaultValue="hoy" className="h-10 rounded border bg-white px-3 text-sm"><option value="hoy">Hoy</option><option value="semana">Ultimos 7 dias</option><option value="">Personalizado</option></select><input name="mes" type="month" className="h-10 rounded border px-3 text-sm" /><input name="desde" type="date" className="h-10 rounded border px-3 text-sm" /><input name="hasta" type="date" className="h-10 rounded border px-3 text-sm" /><div className="grid grid-cols-2 gap-2"><input name="horaDesde" type="time" className="h-10 min-w-0 rounded border px-2" /><input name="horaHasta" type="time" className="h-10 min-w-0 rounded border px-2" /></div><select name="estado" className="h-10 rounded border bg-white px-3 text-sm"><option value="">Sin cancelados</option>{orderStates.map((state) => <option key={state} value={state}>{orderStateLabels[state]}</option>)}</select><button disabled={busy} className="h-10 rounded bg-[#D32F2F] px-4 text-sm font-bold text-white">{busy ? "Calculando" : "Generar"}</button></form>
+    <div className="mt-4 flex flex-wrap gap-2"><a href={`/api/admin/consolidado/pdf?${query}`} target="_blank" rel="noreferrer" className="rounded border px-3 py-2 text-xs font-bold uppercase">Descargar PDF</a><a href={`/api/admin/consolidado/csv?${query}`} className="rounded border px-3 py-2 text-xs font-bold uppercase">Exportar CSV / Excel</a><button onClick={() => window.print()} className="rounded border px-3 py-2 text-xs font-bold uppercase">Imprimir</button></div>
+  </Panel><div className="grid gap-4 md:grid-cols-3"><Kpi label="Pedidos" value={data.summary?.orders ?? 0} /><Kpi label="Productos agrupados" value={data.summary?.products ?? 0} /><Kpi label="Total referencial" value={money(data.summary?.total ?? 0)} /></div><Panel title="Productos para carga"><DataTable rows={data.rows ?? []} columns={["codigo", "producto", "categoria", "marca", "unidad", "cantidad", "precioReferencial", "subtotal", "pedidos", "observacion"]} /></Panel></div>;
 }
 
 function Reports({ data }: { data: AnyRow }) {

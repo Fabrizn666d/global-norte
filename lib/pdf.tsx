@@ -23,10 +23,15 @@ type PdfOrder = {
   entregaProvincia: string;
   entregaDepartamento: string;
   entregaReferencia?: string | null;
+  entregaMapsUrl?: string | null;
+  metodoEntrega?: string | null;
   estado: string;
   metodoPago: string;
   subtotal: number;
   descuento: number;
+  cuponCodigo?: string | null;
+  cuponDescripcion?: string | null;
+  bonificaciones?: string | null;
   total: number;
   notasCliente?: string | null;
   notasInternas?: string | null;
@@ -76,8 +81,9 @@ const styles = StyleSheet.create({
   tableRow: { flexDirection: "row", paddingVertical: 6, paddingHorizontal: 6, borderBottom: `1 solid ${line}`, fontSize: 8 },
   tableRowAlt: { flexDirection: "row", paddingVertical: 6, paddingHorizontal: 6, borderBottom: `1 solid ${line}`, backgroundColor: "#FAFAFA", fontSize: 8 },
   codeCol: { width: "13%" },
-  productCol: { width: "34%" },
-  brandCol: { width: "15%" },
+  productCol: { width: "29%" },
+  brandCol: { width: "13%" },
+  unitCol: { width: "7%" },
   qtyCol: { width: "9%", textAlign: "right" },
   priceCol: { width: "14%", textAlign: "right" },
   subtotalCol: { width: "15%", textAlign: "right" },
@@ -185,6 +191,8 @@ function CustomerAndDelivery({ order, admin = false }: { order: PdfOrder; admin?
         <InfoRow label="Distrito:" value={order.entregaDistrito} />
         <InfoRow label="Provincia:" value={`${order.entregaProvincia}, ${order.entregaDepartamento}`} />
         <InfoRow label="Referencia:" value={order.entregaReferencia} />
+        <InfoRow label="Google Maps:" value={order.entregaMapsUrl} />
+        <InfoRow label="Entrega:" value={order.metodoEntrega} />
         <InfoRow label="Pago:" value={order.metodoPago} />
       </View>
     </View>
@@ -198,6 +206,7 @@ function ItemsTable({ order, admin = false }: { order: PdfOrder; admin?: boolean
         <Text style={styles.codeCol}>Codigo</Text>
         <Text style={styles.productCol}>Producto</Text>
         <Text style={styles.brandCol}>Marca</Text>
+        <Text style={styles.unitCol}>Unidad</Text>
         <Text style={styles.qtyCol}>Cant.</Text>
         <Text style={styles.priceCol}>P. Unit.</Text>
         <Text style={styles.subtotalCol}>Subtotal</Text>
@@ -207,6 +216,7 @@ function ItemsTable({ order, admin = false }: { order: PdfOrder; admin?: boolean
           <Text style={styles.codeCol}>{item.codigoInterno}</Text>
           <Text style={[styles.productCol, styles.productText]}>{item.nombre}</Text>
           <Text style={styles.brandCol}>{clean(item.marca)}</Text>
+          <Text style={styles.unitCol}>{item.etiqueta || item.tipoPrecio}</Text>
           <Text style={styles.qtyCol}>{item.cantidad}</Text>
           <Text style={styles.priceCol}>{money(item.precio)}</Text>
           <Text style={styles.subtotalCol}>{money(item.subtotal)}</Text>
@@ -217,6 +227,8 @@ function ItemsTable({ order, admin = false }: { order: PdfOrder; admin?: boolean
 }
 
 function TotalsAndMessage({ order, admin = false }: { order: PdfOrder; admin?: boolean }) {
+  let bonuses: Array<{ name?: string; description?: string; quantity?: number }> = [];
+  try { bonuses = JSON.parse(order.bonificaciones || "[]"); } catch { bonuses = []; }
   return (
     <View style={styles.totalsWrap}>
       <View style={styles.noteBox}>
@@ -226,7 +238,9 @@ function TotalsAndMessage({ order, admin = false }: { order: PdfOrder; admin?: b
             ? `Gracias por su pedido. Nos comunicaremos para coordinar la entrega. Cliente: ${clean(order.notasCliente)} | Interno: ${clean(order.notasInternas)}`
             : "Gracias por su pedido. Nos comunicaremos para coordinar la entrega."}
         </Text>
-        {!admin ? <Text style={styles.noteText}>Pedido sujeto a confirmacion de stock, precios y disponibilidad.</Text> : null}
+        {order.cuponCodigo ? <Text style={styles.noteText}>Cupon: {order.cuponCodigo} - {clean(order.cuponDescripcion)}</Text> : null}
+        {bonuses.map((bonus, index) => <Text key={`${bonus.name}-${index}`} style={styles.noteText}>Bonificacion / regalo: {bonus.quantity || 1} x {bonus.name} - {bonus.description || "Sin costo"} (S/ 0.00)</Text>)}
+        {!admin ? <Text style={styles.noteText}>No es comprobante de pago ni factura electronica. Pedido sujeto a confirmacion.</Text> : null}
       </View>
       <View style={styles.totals}>
         <View style={styles.totalLine}><Text>Subtotal</Text><Text>{money(order.subtotal)}</Text></View>
@@ -263,10 +277,10 @@ function AdminProforma({ order, logoSrc, company }: { order: PdfOrder; logoSrc: 
   return (
     <Document title={`Proforma ${order.numero}`} author={company.name}>
       <Page size="A4" style={styles.page}>
-        <Header order={order} title="PROFORMA / PEDIDO" logoSrc={logoSrc} company={company} admin />
+        <Header order={order} title="PROFORMA INTERNA / PEDIDO" logoSrc={logoSrc} company={company} admin />
         <View style={styles.box}>
           <Text style={styles.boxTitle}>{company.legalName}</Text>
-          <Text style={styles.companyLine}>Documento interno para validacion de stock, precios, estado y coordinacion de entrega.</Text>
+          <Text style={styles.companyLine}>Pedido para preparacion. Documento interno para validar stock, precios, estado y entrega.</Text>
         </View>
         <CustomerAndDelivery order={order} admin />
         <ItemsTable order={order} admin />

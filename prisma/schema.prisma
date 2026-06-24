@@ -8,10 +8,10 @@ datasource db {
 }
 
 model User {
-  id              String    @id @default(cuid())
+  id              String           @id @default(cuid())
   nombre          String
   apellido        String
-  email           String    @unique
+  email           String           @unique
   password        String
   telefono        String
   dni             String?
@@ -23,17 +23,21 @@ model User {
   distrito        String?
   direccion       String?
   referencia      String?
-  rol             String    @default("cliente")
-  activo          Boolean   @default(true)
-  bloqueado       Boolean   @default(false)
+  rol             String           @default("cliente")
+  activo          Boolean          @default(true)
+  bloqueado       Boolean          @default(false)
   motivoBloqueo   String?
-  emailVerificado Boolean   @default(false)
+  emailVerificado Boolean          @default(false)
   ultimoAcceso    DateTime?
-  createdAt       DateTime  @default(now())
-  updatedAt       DateTime  @updatedAt
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
   orders          Order[]
   addresses       Address[]
   carts           Cart[]
+  couponUsages    CouponUsage[]
+  benefit         CustomerBenefit?
+  targetedBonuses Bonus[]          @relation("BonusCustomer")
+  notifications   Notification[]   @relation("NotificationCustomer")
 }
 
 model Address {
@@ -81,39 +85,42 @@ model Brand {
 }
 
 model Product {
-  id               String      @id @default(cuid())
-  codigoInterno    String      @unique
-  nombre           String
-  slug             String      @unique
-  descripcion      String?
-  categoryId       String
-  category         Category    @relation(fields: [categoryId], references: [id])
-  brandId          String?
-  brand            Brand?      @relation(fields: [brandId], references: [id])
-  precioUnitario   Float
-  precioCaja       Float?
-  unidadesPorCaja  Int?
-  etiquetaCaja     String?
-  precioAnterior   Float?
-  stock            Int         @default(0)
-  stockMinimo      Int         @default(1)
-  unidad           String      @default("unidad")
-  imagenes         String      @default("[]")
-  imagenPrincipal  String?
-  activo           Boolean     @default(true)
-  destacado        Boolean     @default(false)
-  enOferta         Boolean     @default(false)
-  nuevo            Boolean     @default(false)
-  agotado          Boolean     @default(false)
-  tags             String      @default("[]")
-  seoTitulo        String?
-  seoDesc          String?
-  vistas           Int         @default(0)
-  vendidos         Int         @default(0)
-  createdAt        DateTime    @default(now())
-  updatedAt        DateTime    @updatedAt
-  orderItems       OrderItem[]
-  cartItems        CartItem[]
+  id                String      @id @default(cuid())
+  codigoInterno     String      @unique
+  nombre            String
+  slug              String      @unique
+  descripcion       String?
+  categoryId        String
+  category          Category    @relation(fields: [categoryId], references: [id])
+  brandId           String?
+  brand             Brand?      @relation(fields: [brandId], references: [id])
+  precioUnitario    Float
+  precioCaja        Float?
+  unidadesPorCaja   Int?
+  etiquetaCaja      String?
+  precioAnterior    Float?
+  stock             Int         @default(0)
+  stockMinimo       Int         @default(1)
+  unidad            String      @default("unidad")
+  imagenes          String      @default("[]")
+  imagenPrincipal   String?
+  activo            Boolean     @default(true)
+  destacado         Boolean     @default(false)
+  mostrarEnHome     Boolean     @default(false)
+  ordenDestacado    Int         @default(0)
+  etiquetaDestacada String?
+  enOferta          Boolean     @default(false)
+  nuevo             Boolean     @default(false)
+  agotado           Boolean     @default(false)
+  tags              String      @default("[]")
+  seoTitulo         String?
+  seoDesc           String?
+  vistas            Int         @default(0)
+  vendidos          Int         @default(0)
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+  orderItems        OrderItem[]
+  cartItems         CartItem[]
 
   @@index([categoryId])
   @@index([brandId])
@@ -148,37 +155,43 @@ model CartItem {
 }
 
 model Order {
-  id                   String         @id @default(cuid())
-  numero               String         @unique
-  userId               String?
-  user                 User?          @relation(fields: [userId], references: [id])
-  clienteNombre        String
-  clienteApellido      String
-  clienteEmail         String
-  clienteTelefono      String
-  clienteDni           String?
-  clienteRuc           String?
-  clienteNegocio       String?
-  entregaDireccion     String
-  entregaDistrito      String
-  entregaProvincia     String
-  entregaDepartamento  String
-  entregaReferencia    String?
-  estado               String         @default("pendiente")
-  metodoPago           String         @default("efectivo")
-  pagoEstado           String         @default("pendiente")
-  subtotal             Float
-  descuento            Float          @default(0)
-  total                Float
-  pdfUrl               String?
-  whatsappEnviado      Boolean        @default(false)
-  emailEnviado         Boolean        @default(false)
-  notasCliente         String?
-  notasInternas        String?
-  createdAt            DateTime       @default(now())
-  updatedAt            DateTime       @updatedAt
-  items                OrderItem[]
-  historial            OrderHistory[]
+  id                  String         @id @default(cuid())
+  numero              String         @unique
+  userId              String?
+  user                User?          @relation(fields: [userId], references: [id])
+  clienteNombre       String
+  clienteApellido     String
+  clienteEmail        String
+  clienteTelefono     String
+  clienteDni          String?
+  clienteRuc          String?
+  clienteNegocio      String?
+  entregaDireccion    String
+  entregaDistrito     String
+  entregaProvincia    String
+  entregaDepartamento String
+  entregaReferencia   String?
+  entregaMapsUrl      String?
+  metodoEntrega       String         @default("coordinada")
+  estado              String         @default("pendiente")
+  metodoPago          String         @default("efectivo")
+  pagoEstado          String         @default("pendiente")
+  subtotal            Float
+  descuento           Float          @default(0)
+  cuponCodigo         String?
+  cuponDescripcion    String?
+  bonificaciones      String         @default("[]")
+  total               Float
+  pdfUrl              String?
+  whatsappEnviado     Boolean        @default(false)
+  emailEnviado        Boolean        @default(false)
+  notasCliente        String?
+  notasInternas       String?
+  createdAt           DateTime       @default(now())
+  updatedAt           DateTime       @updatedAt
+  items               OrderItem[]
+  historial           OrderHistory[]
+  couponUsages        CouponUsage[]
 
   @@index([userId])
   @@index([estado])
@@ -186,11 +199,11 @@ model Order {
 }
 
 model OrderItem {
-  id            String   @id @default(cuid())
+  id            String  @id @default(cuid())
   orderId       String
-  order         Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  order         Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
   productId     String
-  product       Product  @relation(fields: [productId], references: [id])
+  product       Product @relation(fields: [productId], references: [id])
   codigoInterno String
   nombre        String
   marca         String?
@@ -222,6 +235,7 @@ model Banner {
   imagenDesktop String
   imagenMobile  String?
   posicion      String    @default("hero")
+  tipo          String    @default("principal_home")
   colorTexto    String    @default("light")
   activo        Boolean   @default(true)
   orden         Int       @default(0)
@@ -229,6 +243,101 @@ model Banner {
   fechaFin      DateTime?
   clics         Int       @default(0)
   createdAt     DateTime  @default(now())
+}
+
+model Coupon {
+  id                   String        @id @default(cuid())
+  codigo               String        @unique
+  descripcion          String?
+  tipo                 String
+  valor                Float         @default(0)
+  regaloNombre         String?
+  usoUnico             Boolean       @default(false)
+  limitePorCliente     Int           @default(1)
+  fechaInicio          DateTime?
+  fechaFin             DateTime?
+  montoMinimo          Float         @default(0)
+  categoriasAplicables String        @default("[]")
+  marcasAplicables     String        @default("[]")
+  productosExcluidos   String        @default("[]")
+  activo               Boolean       @default(true)
+  prioridad            Int           @default(0)
+  cantidadMaximaUsos   Int?
+  cantidadUsos         Int           @default(0)
+  createdAt            DateTime      @default(now())
+  updatedAt            DateTime      @updatedAt
+  usages               CouponUsage[]
+
+  @@index([activo, fechaInicio, fechaFin])
+}
+
+model CouponUsage {
+  id        String   @id @default(cuid())
+  couponId  String
+  coupon    Coupon   @relation(fields: [couponId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  orderId   String
+  order     Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([couponId, orderId])
+  @@index([couponId, userId])
+}
+
+model Bonus {
+  id             String    @id @default(cuid())
+  nombre         String
+  codigoInterno  String?
+  descripcion    String?
+  imagen         String?
+  condicionTipo  String
+  condicionValor Float     @default(0)
+  categoryId     String?
+  brandId        String?
+  clienteId      String?
+  cliente        User?     @relation("BonusCustomer", fields: [clienteId], references: [id], onDelete: SetNull)
+  beneficio      String
+  activo         Boolean   @default(true)
+  fechaInicio    DateTime?
+  fechaFin       DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@index([activo, fechaInicio, fechaFin])
+}
+
+model CustomerBenefit {
+  id                   String   @id @default(cuid())
+  userId               String   @unique
+  user                 User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  cuponExclusivo       String?
+  productoGratis       String?
+  bonificacionEspecial String?
+  descuentoEspecial    Float    @default(0)
+  productosExcluidos   String   @default("[]")
+  productosExclusivos  String   @default("[]")
+  notasInternas        String?
+  aplicarAutomatico    Boolean  @default(true)
+  activo               Boolean  @default(true)
+  updatedAt            DateTime @updatedAt
+}
+
+model Notification {
+  id          String    @id @default(cuid())
+  titulo      String
+  mensaje     String
+  tipo        String
+  fechaInicio DateTime?
+  fechaFin    DateTime?
+  publico     String    @default("todos")
+  clienteId   String?
+  cliente     User?     @relation("NotificationCustomer", fields: [clienteId], references: [id], onDelete: SetNull)
+  activo      Boolean   @default(true)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([activo, fechaInicio, fechaFin])
 }
 
 model Promotion {

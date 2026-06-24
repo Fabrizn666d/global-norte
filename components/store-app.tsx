@@ -32,7 +32,9 @@ import { COMPANY } from "@/lib/company";
 
 type Category = { id: string; nombre: string; slug: string; icono?: string | null; _count?: { products: number } };
 type Brand = { id: string; nombre: string; slug: string; destacada: boolean; _count?: { products: number } };
-type Banner = { id: string; titulo: string; subtitulo?: string | null; descripcion?: string | null; ctaTexto?: string | null; ctaLink?: string | null; imagenDesktop: string; activo: boolean; posicion?: string };
+type Banner = { id: string; titulo: string; subtitulo?: string | null; descripcion?: string | null; ctaTexto?: string | null; ctaLink?: string | null; imagenDesktop: string; imagenMobile?: string | null; activo: boolean; posicion?: string; tipo?: string };
+type StoreNotification = { id: string; titulo: string; mensaje: string; tipo: string };
+type CommerceBenefit = { subtotal: number; discount: number; total: number; coupon?: { code: string; description: string } | null; bonuses: Array<{ name: string; description?: string; quantity: number }>; customerBenefit?: { couponCode?: string | null; message?: string | null } | null };
 type CompanyContact = { name: string; ruc: string; whatsappDisplay: string; whatsappNumber: string; email: string; address: string };
 type Product = {
   id: string;
@@ -52,6 +54,9 @@ type Product = {
   destacado: boolean;
   enOferta: boolean;
   nuevo: boolean;
+  mostrarEnHome?: boolean;
+  ordenDestacado?: number;
+  etiquetaDestacada?: string | null;
   category: Category;
   brand?: Brand | null;
 };
@@ -79,6 +84,10 @@ type Order = {
   estado: string;
   metodoPago: string;
   total: number;
+  descuento?: number;
+  cuponCodigo?: string | null;
+  bonificaciones?: string;
+  entregaMapsUrl?: string | null;
   pdfUrl?: string | null;
   createdAt: string;
   items: Array<{ id: string; codigoInterno: string; nombre: string; cantidad: number; precio: number; subtotal: number }>;
@@ -95,6 +104,7 @@ type CartPayloadItem = { productId: string; cantidad: number; tipoPrecio: string
 const PLACEHOLDER_IMAGE = "/brand/product-placeholder.svg";
 const LOGO_IMAGE = "/brand/global-norte-logo.jpg";
 const CART_STORAGE_KEY = "gn_cart_v2";
+const COUPON_STORAGE_KEY = "gn_coupon_v1";
 
 const stateLabel: Record<string, string> = {
   nuevo: "Nuevo",
@@ -198,6 +208,8 @@ export function StoreApp({ route }: { route: string[] }) {
   const [categories, setCategories] = useState<Category[]>([]);
   const [brands, setBrands] = useState<Brand[]>([]);
   const [banners, setBanners] = useState<Banner[]>([]);
+  const [notifications, setNotifications] = useState<StoreNotification[]>([]);
+  const [helpOpen, setHelpOpen] = useState(false);
   const [company, setCompany] = useState<CompanyContact>(COMPANY);
   const [cart, setCart] = useState<Cart | null>(null);
   const [user, setUser] = useState<User | null>(null);
@@ -222,12 +234,13 @@ export function StoreApp({ route }: { route: string[] }) {
   }, []);
 
   const loadBase = useCallback(async () => {
-    const [categoryData, brandData, bannerData, companyData, meData] = await Promise.all([
+    const [categoryData, brandData, bannerData, companyData, meData, notificationData] = await Promise.all([
       api<{ categories: Category[] }>("/api/categorias"),
       api<{ brands: Brand[] }>("/api/marcas"),
-      api<{ banners: Banner[] }>("/api/banners?posicion=hero"),
+      api<{ banners: Banner[] }>("/api/banners"),
       api<{ company: CompanyContact }>("/api/configuracion-publica"),
       api<{ user: User | null }>("/api/customer/me"),
+      api<{ notifications: StoreNotification[] }>("/api/notificaciones"),
     ]);
     setCategories(categoryData.categories);
     setBrands(brandData.brands);
@@ -235,6 +248,8 @@ export function StoreApp({ route }: { route: string[] }) {
     setCompany(companyData.company);
     setUser(meData.user);
     setAuthReady(true);
+    const dismissed = new Set<string>(JSON.parse(window.localStorage.getItem("gn_dismissed_notifications") || "[]"));
+    setNotifications(notificationData.notifications.filter((item) => !dismissed.has(item.id)));
   }, []);
 
   useEffect(() => {
@@ -298,7 +313,7 @@ export function StoreApp({ route }: { route: string[] }) {
         if (["home", "catalogo", "categoria", "marca"].includes(currentView)) {
           const params = new URLSearchParams(queryString);
           if (currentView === "home") {
-            params.set("destacado", "1");
+            params.set("home", "1");
             params.set("limite", "16");
           } else if (!params.has("limite")) {
             params.set("limite", window.innerWidth < 640 ? "12" : "24");
@@ -370,6 +385,12 @@ export function StoreApp({ route }: { route: string[] }) {
     const params = new URLSearchParams();
     if (query.trim()) params.set("q", query.trim());
     router.push(`/catalogo${params.toString() ? `?${params}` : ""}`);
+  }
+
+  function dismissNotification(id: string) {
+    const current = JSON.parse(window.localStorage.getItem("gn_dismissed_notifications") || "[]") as string[];
+    window.localStorage.setItem("gn_dismissed_notifications", JSON.stringify(Array.from(new Set<string>([...current, id]))));
+    setNotifications((items) => items.filter((item) => item.id !== id));
   }
 
   return (
@@ -472,11 +493,18 @@ export function StoreApp({ route }: { route: string[] }) {
         ) : null}
       </header>
 
+      {notifications.filter((item) => item.tipo === "banner" || item.tipo === (view === "carrito" || view === "checkout" ? "aviso_carrito" : "aviso_home")).map((item) => (
+        <div key={item.id} className="border-b border-red-100 bg-[#FFF5F5] px-4 py-3 text-sm text-neutral-800">
+          <div className="mx-auto flex max-w-7xl items-start justify-between gap-4"><p><strong>{item.titulo}:</strong> {item.mensaje}</p><button title="Cerrar aviso" onClick={() => dismissNotification(item.id)}><X className="h-4 w-4" /></button></div>
+        </div>
+      ))}
+      {notifications.find((item) => item.tipo === "popup") ? (() => { const item = notifications.find((entry) => entry.tipo === "popup")!; return <div className="fixed inset-0 z-50 grid place-items-center bg-black/45 p-4"><div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl"><div className="flex justify-between gap-3"><h2 className="text-xl font-black">{item.titulo}</h2><button title="Cerrar" onClick={() => dismissNotification(item.id)}><X className="h-5 w-5" /></button></div><p className="mt-3 text-sm leading-6 text-neutral-600">{item.mensaje}</p></div></div>; })() : null}
+
       <main>
         {view === "login" || (view === "clientes" && route[1] === "login") ? <LoginView onUser={setUser} /> : null}
         {view === "registro" || (view === "clientes" && route[1] === "registro") ? <RegisterView onUser={setUser} /> : null}
         {view === "carrito" ? (
-          <CartView cart={cart} total={cartTotal} user={user} onUpdate={updateCartItem} onRemove={removeCartItem} onClear={clearCart} />
+          <CartView cart={cart} total={cartTotal} user={user} banners={banners} onUpdate={updateCartItem} onRemove={removeCartItem} onClear={clearCart} />
         ) : null}
         {view === "checkout" ? <CheckoutView cart={cart} total={cartTotal} user={user} authReady={authReady} onClear={clearCart} /> : null}
         {view === "pedido-confirmado" ? <ConfirmedView order={order} /> : null}
@@ -496,9 +524,13 @@ export function StoreApp({ route }: { route: string[] }) {
             pagination={pagination}
             error={catalogError}
             onAdd={addToCart}
+            onHelp={() => setHelpOpen(true)}
           />
         ) : null}
       </main>
+
+      {view === "home" ? <button onClick={() => setHelpOpen(true)} className="fixed bottom-5 right-5 z-30 rounded-full bg-[#D71920] px-5 py-3 text-sm font-black text-white shadow-xl">¿Como hacer un pedido?</button> : null}
+      {helpOpen ? <OrderHelp onClose={() => setHelpOpen(false)} /> : null}
 
       <footer className="mt-16 bg-[#151515] text-white">
         <div className="mx-auto grid max-w-7xl gap-8 px-4 py-10 md:grid-cols-[1.3fr_1fr_1fr_1fr]">
@@ -531,6 +563,13 @@ export function StoreApp({ route }: { route: string[] }) {
   );
 }
 
+function OrderHelp({ onClose }: { onClose: () => void }) {
+  const steps = ["Busca productos en el catalogo.", "Agrega las cantidades al carrito.", "Inicia sesion o crea tu cuenta mayorista.", "Completa direccion y Google Maps.", "Registra el pedido.", "Un asesor confirma disponibilidad y entrega."];
+  return <div className="fixed inset-0 z-50 grid place-items-center bg-black/55 p-4" role="dialog" aria-modal="true" aria-label="Como hacer un pedido">
+    <div className="w-full max-w-xl rounded-2xl bg-white p-6 shadow-2xl"><div className="flex items-center justify-between"><h2 className="text-2xl font-black">¿Como hacer un pedido?</h2><button onClick={onClose} title="Cerrar"><X className="h-5 w-5" /></button></div><ol className="mt-5 grid gap-3">{steps.map((step, index) => <li key={step} className="flex gap-3 text-sm font-semibold text-neutral-700"><span className="grid h-7 w-7 shrink-0 place-items-center rounded-full bg-[#D71920] text-xs font-black text-white">{index + 1}</span>{step}</li>)}</ol><div className="mt-6 flex justify-end"><Link href="/catalogo" onClick={onClose} className="rounded bg-[#D71920] px-5 py-3 text-sm font-black text-white">Empezar pedido</Link></div></div>
+  </div>;
+}
+
 function HeaderLink({ href, label }: { href: string; label: string }) {
   return (
     <Link href={href} className="inline-flex h-10 items-center rounded-xl border border-transparent px-3 text-sm font-extrabold text-neutral-700 transition hover:border-neutral-200 hover:bg-[#FFF5F5] hover:text-[#D71920]">
@@ -539,7 +578,7 @@ function HeaderLink({ href, label }: { href: string; label: string }) {
   );
 }
 
-function Hero({ banner }: { banner?: Banner }) {
+function Hero({ banner, onHelp }: { banner?: Banner; onHelp: () => void }) {
   const hasCustomImage = Boolean(banner?.imagenDesktop && banner.imagenDesktop !== LOGO_IMAGE);
   return (
     <section className="bg-[#F4F5F7] px-4 py-6">
@@ -559,6 +598,7 @@ function Hero({ banner }: { banner?: Banner }) {
             <Link href="/registro" className="inline-flex h-12 items-center gap-2 rounded-2xl border border-white/35 bg-black/20 px-5 text-sm font-black text-white backdrop-blur transition hover:-translate-y-0.5 hover:bg-black/30">
               Crear cuenta mayorista <Building2 className="h-4 w-4" />
             </Link>
+            <button onClick={onHelp} className="inline-flex h-12 items-center rounded-2xl border border-white/35 px-5 text-sm font-black text-white">¿Como pedir?</button>
           </div>
           <div className="mt-8 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
             <HeroMetric icon={<Package className="h-5 w-5" />} label="409 productos" />
@@ -570,7 +610,7 @@ function Hero({ banner }: { banner?: Banner }) {
         <div className="relative min-h-[340px] p-6 lg:p-10">
           <div className="absolute inset-x-10 bottom-8 h-24 rounded-[50%] bg-black/20 blur-2xl" />
           {hasCustomImage ? (
-            <img src={imageSrc(banner?.imagenDesktop)} onError={usePlaceholderImage} alt={banner?.titulo || "Banner Global Norte"} className="relative h-full min-h-[300px] w-full rounded-[26px] object-cover shadow-2xl" />
+            <picture><source media="(max-width: 640px)" srcSet={imageSrc(banner?.imagenMobile || banner?.imagenDesktop)} /><img src={imageSrc(banner?.imagenDesktop)} onError={usePlaceholderImage} alt={banner?.titulo || "Banner Global Norte"} className="relative h-full min-h-[300px] w-full rounded-[26px] object-cover shadow-2xl" /></picture>
           ) : (
           <div className="relative ml-auto grid max-w-md gap-4 rounded-[26px] bg-white/95 p-5 shadow-2xl">
             <div className="flex items-center gap-4 rounded-2xl bg-[#151515] p-4 text-white">
@@ -610,6 +650,10 @@ function HeroMetric({ icon, label }: { icon: React.ReactNode; label: string }) {
   );
 }
 
+function CampaignStrip({ banner }: { banner: Banner }) {
+  return <section className="mx-auto max-w-7xl px-4 pt-5"><div className="grid overflow-hidden rounded-2xl bg-neutral-900 text-white sm:grid-cols-[1fr_260px]"><div className="p-5"><p className="text-xl font-black">{banner.titulo}</p><p className="mt-1 text-sm text-white/75">{banner.descripcion || banner.subtitulo}</p>{banner.ctaLink ? <Link href={banner.ctaLink} className="mt-3 inline-flex rounded bg-[#D71920] px-4 py-2 text-xs font-black uppercase">{banner.ctaTexto || "Ver mas"}</Link> : null}</div>{banner.imagenDesktop ? <picture><source media="(max-width: 640px)" srcSet={imageSrc(banner.imagenMobile || banner.imagenDesktop)} /><img src={imageSrc(banner.imagenDesktop)} alt={banner.titulo} className="h-full min-h-32 w-full object-cover" /></picture> : null}</div></section>;
+}
+
 function CatalogView({
   view,
   route,
@@ -621,6 +665,7 @@ function CatalogView({
   pagination,
   error,
   onAdd,
+  onHelp,
 }: {
   view: string;
   route: string[];
@@ -632,6 +677,7 @@ function CatalogView({
   pagination: { page: number; pages: number; total: number };
   error: string | null;
   onAdd: (productId: string, tipoPrecio?: string, cantidad?: number) => Promise<void>;
+  onHelp: () => void;
 }) {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -671,7 +717,8 @@ function CatalogView({
 
   return (
     <>
-      {view === "home" ? <Hero banner={banners[0]} /> : null}
+      {view === "home" ? <Hero banner={banners.find((banner) => banner.posicion === "hero" || banner.tipo === "principal_home")} onHelp={onHelp} /> : null}
+      {view === "catalogo" && banners.find((banner) => banner.tipo === "catalogo") ? <CampaignStrip banner={banners.find((banner) => banner.tipo === "catalogo")!} /> : null}
       <section className="mx-auto max-w-7xl px-4 py-8">
         <div className="mb-5 flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
           <div>
@@ -789,6 +836,7 @@ function ProductCard({ product, onAdd }: { product: Product; onAdd: (productId: 
       <div className="p-3 sm:p-4">
         <div className="mb-2 flex min-h-6 flex-wrap gap-1.5">
           <span className="rounded-full bg-[#FFF5F5] px-2.5 py-1 text-[10px] font-black uppercase text-[#D71920]">{product.codigoInterno}</span>
+          {product.etiquetaDestacada ? <span className="rounded-full bg-neutral-900 px-2.5 py-1 text-[10px] font-black uppercase text-white">{product.etiquetaDestacada.replace("_", " ")}</span> : null}
           {product.stock <= product.stockMinimo ? <span className="rounded-full bg-orange-50 px-2.5 py-1 text-[10px] font-black uppercase text-orange-700">Stock bajo</span> : null}
         </div>
         <Link href={`/catalogo/${product.slug}`} className="line-clamp-2 min-h-10 text-[13px] font-black leading-5 text-neutral-950 hover:text-[#D71920] sm:text-sm">
@@ -979,9 +1027,27 @@ function TextInput({ label, ...props }: React.InputHTMLAttributes<HTMLInputEleme
   );
 }
 
-function CartView({ cart, total, user, onUpdate, onRemove, onClear }: { cart: Cart | null; total: number; user: User | null; onUpdate: (id: string, cantidad: number) => Promise<void>; onRemove: (id: string) => Promise<void>; onClear: () => void }) {
+function CartView({ cart, total, user, banners, onUpdate, onRemove, onClear }: { cart: Cart | null; total: number; user: User | null; banners: Banner[]; onUpdate: (id: string, cantidad: number) => Promise<void>; onRemove: (id: string) => Promise<void>; onClear: () => void }) {
+  const [couponCode, setCouponCode] = useState("");
+  const [benefit, setBenefit] = useState<CommerceBenefit | null>(null);
+  const [applying, setApplying] = useState(false);
+  const cartKey = cart?.items.map((item) => `${item.product.id}:${item.cantidad}:${item.tipoPrecio}`).join("|") ?? "";
+  const validate = useCallback(async (code: string, silent = false) => {
+    if (!user || !cart?.items.length) return;
+    setApplying(true);
+    try {
+      const data = await api<{ benefit: CommerceBenefit }>("/api/cupones/validar", { method: "POST", body: JSON.stringify({ couponCode: code, items: cart.items.map((item) => ({ productId: item.product.id, cantidad: item.cantidad, tipoPrecio: item.tipoPrecio })) }) });
+      setBenefit(data.benefit);
+      if (data.benefit.coupon?.code) window.localStorage.setItem(COUPON_STORAGE_KEY, data.benefit.coupon.code);
+      if (!silent) toast.success(data.benefit.coupon ? "Cupon aplicado" : "Beneficios actualizados");
+    } catch (error) { setBenefit(null); if (!silent) toast.error(error instanceof Error ? error.message : "Cupon invalido"); }
+    finally { setApplying(false); }
+  }, [cart, user]);
+  useEffect(() => { const saved = window.localStorage.getItem(COUPON_STORAGE_KEY) || ""; setCouponCode(saved); if (user && cartKey) validate(saved, true); }, [cartKey, user, validate]);
   if (!cart?.items.length) return <EmptyState title="Carrito vacio" action="/catalogo" actionLabel="Ver catalogo" icon={<ShoppingCart className="h-8 w-8" />} />;
-  return (
+  const campaign = banners.find((banner) => banner.tipo === "carrito");
+  return (<>
+    {campaign ? <CampaignStrip banner={campaign} /> : null}
     <section className="mx-auto grid max-w-7xl gap-6 px-4 py-8 lg:grid-cols-[1fr_360px]">
       <div className="grid gap-3">
         <div className="flex items-center justify-between gap-3">
@@ -1008,22 +1074,35 @@ function CartView({ cart, total, user, onUpdate, onRemove, onClear }: { cart: Ca
       <aside className="h-fit rounded border border-neutral-200 bg-white p-5">
         <p className="text-sm font-bold uppercase tracking-wide text-neutral-500">Resumen del pedido</p>
         <div className="mt-4 flex justify-between text-sm"><span>Subtotal</span><strong>{money(total)}</strong></div>
-        <div className="mt-2 flex justify-between text-sm"><span>Descuento</span><strong>{money(0)}</strong></div>
-        <div className="mt-4 flex justify-between border-t border-neutral-200 pt-4 text-xl font-extrabold text-[#D32F2F]"><span>Total</span><span>{money(total)}</span></div>
+        <div className="mt-2 flex justify-between text-sm"><span>Descuento</span><strong>-{money(benefit?.discount ?? 0)}</strong></div>
+        {benefit?.coupon ? <p className="mt-2 text-xs font-bold text-green-700">Cupon {benefit.coupon.code}: {benefit.coupon.description}</p> : null}
+        {benefit?.customerBenefit?.message ? <p className="mt-2 rounded bg-red-50 p-2 text-xs font-bold text-[#D71920]">Por ser cliente frecuente: {benefit.customerBenefit.message}</p> : null}
+        {benefit?.bonuses.map((bonus, index) => <p key={`${bonus.name}-${index}`} className="mt-2 rounded bg-amber-50 p-2 text-xs font-bold text-amber-800">Te obsequiamos: {bonus.name} - S/ 0.00</p>)}
+        <div className="mt-4 flex justify-between border-t border-neutral-200 pt-4 text-xl font-extrabold text-[#D32F2F]"><span>Total</span><span>{money(benefit?.total ?? total)}</span></div>
+        <div className="mt-4 flex gap-2"><input value={couponCode} onChange={(event) => setCouponCode(event.target.value.toUpperCase())} placeholder="Ingresar cupon" className="h-10 min-w-0 flex-1 rounded border border-neutral-300 px-3 text-sm" /><button disabled={!user || applying} onClick={() => validate(couponCode)} className="rounded border border-[#D71920] px-3 text-xs font-black text-[#D71920] disabled:opacity-50">{applying ? "Validando" : "Aplicar"}</button></div>
         <Link href={user ? "/checkout" : "/login?next=%2Fcheckout"} className="mt-5 inline-flex h-11 w-full items-center justify-center rounded bg-[#D32F2F] text-sm font-bold text-white hover:bg-[#B71C1C]">
           {user ? "Finalizar pedido" : "Ingresar para finalizar"}
         </Link>
+        <p className="mt-3 text-xs font-semibold leading-5 text-neutral-500">Completa tus datos para coordinar tu pedido. No es una compra confirmada; un asesor revisara disponibilidad y coordinara por WhatsApp.</p>
       </aside>
-    </section>
+    </section></>
   );
 }
 
 function CheckoutView({ cart, total, user, authReady, onClear }: { cart: Cart | null; total: number; user: User | null; authReady: boolean; onClear: () => void }) {
   const router = useRouter();
   const [submitting, setSubmitting] = useState(false);
+  const [couponCode, setCouponCode] = useState("");
+  const [benefit, setBenefit] = useState<CommerceBenefit | null>(null);
   useEffect(() => {
     if (authReady && user === null) router.replace("/login?next=%2Fcheckout");
   }, [authReady, router, user]);
+  useEffect(() => {
+    if (!user || !cart?.items.length) return;
+    const code = window.localStorage.getItem(COUPON_STORAGE_KEY) || "";
+    setCouponCode(code);
+    api<{ benefit: CommerceBenefit }>("/api/cupones/validar", { method: "POST", body: JSON.stringify({ couponCode: code, items: cart.items.map((item) => ({ productId: item.product.id, cantidad: item.cantidad, tipoPrecio: item.tipoPrecio })) }) }).then((data) => setBenefit(data.benefit)).catch(() => setBenefit(null));
+  }, [user, cart]);
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!user) {
@@ -1033,12 +1112,14 @@ function CheckoutView({ cart, total, user, authReady, onClear }: { cart: Cart | 
     setSubmitting(true);
     const payload = {
       ...formData(event),
+      couponCode,
       items: cart?.items.map((item): CartPayloadItem => ({ productId: item.product.id, cantidad: item.cantidad, tipoPrecio: item.tipoPrecio })) ?? [],
     };
     try {
       const data = await api<{ order: Order; waLink?: string }>("/api/orders", { method: "POST", body: JSON.stringify(payload) });
       toast.success("Pedido registrado. Un asesor confirmara disponibilidad y entrega.");
       onClear();
+      window.localStorage.removeItem(COUPON_STORAGE_KEY);
       router.push(`/pedido-confirmado?id=${data.order.id}`);
     } catch (error) {
       const message = error instanceof Error ? error.message : "No se pudo registrar el pedido";
@@ -1062,6 +1143,7 @@ function CheckoutView({ cart, total, user, authReady, onClear }: { cart: Cart | 
           <TextInput name="telefono" label="Telefono WhatsApp" defaultValue={user?.telefono ?? ""} required />
           <TextInput name="direccion" label="Direccion" defaultValue={user?.direccion ?? ""} required />
           <TextInput name="referencia" label="Referencia" defaultValue={user?.referencia ?? ""} />
+          <TextInput name="mapsUrl" label="Link de Google Maps" type="url" placeholder="https://maps.google.com/..." />
           <TextInput name="distrito" label="Distrito" defaultValue={user?.distrito ?? ""} />
           <TextInput name="email" label="Email opcional" type="email" defaultValue={user?.email ?? ""} />
           <label className="grid gap-1 text-sm font-semibold text-neutral-700">
@@ -1094,7 +1176,11 @@ function CheckoutView({ cart, total, user, authReady, onClear }: { cart: Cart | 
       </form>
       <aside className="h-fit rounded border border-neutral-200 bg-white p-5">
         <p className="text-sm font-bold uppercase tracking-wide text-neutral-500">Total a pagar</p>
-        <p className="mt-3 text-3xl font-extrabold text-[#D32F2F]">{money(total)}</p>
+        <div className="mt-3 flex justify-between text-sm"><span>Subtotal</span><strong>{money(total)}</strong></div>
+        <div className="mt-2 flex justify-between text-sm"><span>Descuento</span><strong>-{money(benefit?.discount ?? 0)}</strong></div>
+        <p className="mt-3 text-3xl font-extrabold text-[#D32F2F]">{money(benefit?.total ?? total)}</p>
+        {benefit?.coupon ? <p className="mt-2 text-xs font-bold text-green-700">Cupon aplicado: {benefit.coupon.code}</p> : null}
+        {benefit?.bonuses.map((bonus, index) => <p key={`${bonus.name}-${index}`} className="mt-2 rounded bg-amber-50 p-2 text-xs font-bold text-amber-800">Bonificacion / regalo: {bonus.name} - S/ 0.00</p>)}
         <p className="mt-2 text-xs font-semibold text-neutral-500">Este documento no es comprobante de pago ni factura/boleta electronica.</p>
         <div className="mt-4 grid gap-2 text-sm text-neutral-600">
           {cart.items.map((item) => (
@@ -1127,6 +1213,8 @@ function ConfirmedView({ order }: { order: Order | null }) {
                   <strong>{money(item.subtotal)}</strong>
                 </div>
               ))}
+              {order.cuponCodigo ? <div className="flex justify-between border-t border-neutral-100 p-3 text-sm text-green-700"><span>Cupon {order.cuponCodigo}</span><strong>-{money(order.descuento ?? 0)}</strong></div> : null}
+              {(JSON.parse(order.bonificaciones || "[]") as Array<{ name?: string }>).map((bonus, index) => <div key={`${bonus.name}-${index}`} className="border-t border-neutral-100 p-3 text-sm font-bold text-amber-700">Bonificacion / regalo: {bonus.name} - S/ 0.00</div>)}
               <div className="flex justify-between border-t border-neutral-200 p-3 text-sm font-extrabold">
                 <span>Total</span>
                 <span>{money(order.total)}</span>
@@ -1135,10 +1223,12 @@ function ConfirmedView({ order }: { order: Order | null }) {
             <p className="mt-4 text-xs font-semibold text-neutral-500">
               Pedido sujeto a confirmacion de stock, precios y entrega. No es comprobante de pago.
             </p>
+            {order.entregaMapsUrl ? <a href={order.entregaMapsUrl} target="_blank" rel="noreferrer" className="mt-3 inline-flex text-sm font-bold text-[#D71920]">Abrir ubicacion registrada</a> : null}
             <div className="mt-5 flex flex-wrap justify-center gap-3">
               {order.pdfUrl ? <a href={`/api/pdf/${order.id}`} target="_blank" className="inline-flex h-11 items-center gap-2 rounded border border-neutral-300 px-4 text-sm font-bold" rel="noreferrer"><ClipboardList className="h-4 w-4" /> Descargar PDF</a> : null}
               <button onClick={() => window.print()} className="inline-flex h-11 items-center rounded border border-neutral-300 px-4 text-sm font-bold">Imprimir</button>
               <Link href="/mi-cuenta/pedidos" className="inline-flex h-11 items-center rounded border border-neutral-300 px-4 text-sm font-bold">Ver mis pedidos</Link>
+              <a href={`https://wa.me/${COMPANY.whatsappNumber}?text=${encodeURIComponent(`Hola Global Norte, deseo coordinar el pedido ${order.numero}. Total estimado: ${money(order.total)}`)}`} target="_blank" rel="noreferrer" className="inline-flex h-11 items-center rounded border border-green-300 px-4 text-sm font-bold text-green-700">Coordinar por WhatsApp</a>
               <Link href="/catalogo" className="inline-flex h-11 items-center rounded bg-[#D32F2F] px-4 text-sm font-bold text-white">Seguir comprando</Link>
             </div>
           </>

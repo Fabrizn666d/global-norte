@@ -108,11 +108,17 @@ test("admin productos e imagenes y banners funcionan", async ({ page }) => {
   await page.locator("input[name='stock']").fill("5");
   await page.locator("input[name='stockMinimo']").fill("1");
   await page.locator("input[name='unidad']").fill("unidad");
+  await page.getByLabel("Mostrar en home").check();
+  await page.getByLabel("Destacado", { exact: true }).check();
+  await page.getByLabel("Orden en home").fill("0");
+  await page.getByLabel("Etiqueta destacada").selectOption("recomendado");
   await page.getByLabel("Subir imagen").setInputFiles(uploadImage);
   await expect(page.getByLabel("Imagen principal")).toHaveValue(/\/uploads\/products\//, { timeout: 20000 });
   await page.getByRole("button", { name: "Guardar producto" }).click();
   await page.getByPlaceholder("Buscar codigo, nombre o marca").fill(productCode);
   await expect(page.getByText(productCode)).toBeVisible({ timeout: 20000 });
+  await page.goto(baseURL, { waitUntil: "networkidle" });
+  await expect(page.locator("article", { hasText: productCode })).toBeVisible({ timeout: 20000 });
   await page.goto(`${baseURL}/catalogo?q=${encodeURIComponent(productCode)}`, { waitUntil: "networkidle" });
   await expect(page.locator("article", { hasText: productCode })).toBeVisible({ timeout: 20000 });
   await expect(page.locator("article", { hasText: productCode }).locator("img")).toHaveAttribute("src", /\/api\/media\/uploads\/products\//);
@@ -129,7 +135,10 @@ test("admin productos e imagenes y banners funcionan", async ({ page }) => {
   const bannerTitle = `Banner UI ${Date.now()}`;
   await page.getByLabel("Titulo", { exact: true }).fill(bannerTitle);
   await page.getByLabel("Subtitulo").fill("Oferta mayorista");
+  await page.getByLabel("Inicio programado").fill("2026-01-01T00:00");
+  await page.getByLabel("Fin programado").fill("2026-12-31T23:59");
   await page.getByLabel("Subir imagen").setInputFiles(uploadImage);
+  await page.getByLabel("Cargar archivo movil").setInputFiles(uploadImage);
   await expect(page.getByLabel("Imagen", { exact: true })).toHaveValue(/\/uploads\/banners\//, { timeout: 20000 });
   await page.getByRole("button", { name: "Guardar" }).click();
   await expect(page.getByText(bannerTitle)).toBeVisible({ timeout: 20000 });
@@ -169,4 +178,96 @@ test("admin productos e imagenes y banners funcionan", async ({ page }) => {
 
   await page.getByRole("button", { name: "Cerrar sesion" }).click();
   await expect(page.getByRole("heading", { name: "Global Norte - Panel Admin" })).toBeVisible({ timeout: 20000 });
+});
+
+test("cupones, bonificaciones, notificaciones y consolidado funcionan", async ({ page }) => {
+  page.on("dialog", async (dialog) => dialog.accept());
+  const suffix = Date.now();
+  const phone = `9${suffix.toString().slice(-8)}`;
+
+  await page.goto(`${baseURL}/catalogo?q=ACEITE`, { waitUntil: "networkidle" });
+  const card = page.locator("article").first();
+  await expect(card).toContainText(/ACEITE/i);
+  for (let index = 0; index < 29; index += 1) await card.getByRole("button", { name: "Sumar" }).click();
+  await card.getByRole("button", { name: "Agregar al pedido" }).click();
+  await page.goto(`${baseURL}/registro?next=%2Fcarrito`, { waitUntil: "networkidle" });
+  await page.getByLabel("Nombre del negocio").fill(`Bodega Beneficios QA ${suffix}`);
+  await page.getByLabel("Nombre de contacto").fill("Cliente Beneficios QA");
+  await page.getByLabel("Telefono WhatsApp").fill(phone);
+  await page.getByLabel("Password").fill("cliente123");
+  await page.getByLabel("Direccion").fill("Av. QA 456");
+  await page.getByLabel("Referencia").fill("Puerta roja");
+  await page.getByLabel("Distrito").fill("Carabayllo");
+  await page.getByRole("button", { name: "Crear cuenta" }).click();
+  await expect(page).toHaveURL(/\/carrito/, { timeout: 20000 });
+  await expect(page.getByTitle("Mi cuenta")).toBeVisible({ timeout: 20000 });
+  await page.getByPlaceholder("Ingresar cupon").fill("BODEGA10");
+  await page.getByRole("button", { name: "Aplicar" }).click();
+  await expect(page.getByText(/Cupon BODEGA10/)).toBeVisible({ timeout: 20000 });
+  await expect(page.getByText(/Te obsequiamos: Regalo mayorista/)).toBeVisible({ timeout: 20000 });
+  await page.getByRole("link", { name: "Finalizar pedido" }).click();
+  await page.getByLabel("Link de Google Maps").fill("https://maps.google.com/?q=-11.9,-77.0");
+  const orderResponsePromise = page.waitForResponse((response) => response.url().includes("/api/orders") && response.request().method() === "POST");
+  await page.getByRole("button", { name: "Registrar pedido" }).click();
+  const orderResponse = await orderResponsePromise;
+  expect(orderResponse.ok(), await orderResponse.text()).toBeTruthy();
+  await expect(page.getByRole("heading", { name: "Pedido registrado" })).toBeVisible({ timeout: 30000 });
+  await expect(page.getByText(/Cupon BODEGA10/)).toBeVisible();
+  await expect(page.getByText(/Bonificacion \/ regalo/)).toBeVisible();
+
+  await page.goto(`${baseURL}/admin`, { waitUntil: "networkidle" });
+  await page.getByLabel("Email").fill(adminEmail);
+  await page.getByLabel("Password").fill(adminPassword);
+  await page.getByRole("button", { name: "Ingresar" }).click();
+  await expect(page.getByRole("heading", { name: "Dashboard" })).toBeVisible({ timeout: 20000 });
+
+  await page.goto(`${baseURL}/admin/consolidado`, { waitUntil: "networkidle" });
+  await expect(page.getByRole("heading", { name: "Consolidado de carga", level: 1 })).toBeVisible();
+  await expect(page.getByText("ACEITE ALPA DE 1LT")).toBeVisible({ timeout: 20000 });
+  const pdfHref = await page.getByRole("link", { name: "Descargar PDF" }).getAttribute("href");
+  const csvHref = await page.getByRole("link", { name: "Exportar CSV / Excel" }).getAttribute("href");
+  const consolidatedPdf = await page.request.get(`${baseURL}${pdfHref}`);
+  const consolidatedCsv = await page.request.get(`${baseURL}${csvHref}`);
+  expect(consolidatedPdf.headers()["content-type"]).toContain("application/pdf");
+  expect(consolidatedCsv.headers()["content-type"]).toContain("text/csv");
+
+  const couponCode = `QA${suffix}`;
+  await page.goto(`${baseURL}/admin/cupones`, { waitUntil: "networkidle" });
+  await page.getByLabel("Codigo").fill(couponCode);
+  await page.getByLabel("Descripcion").fill("Cupon QA");
+  await page.getByLabel("Monto o porcentaje").fill("5");
+  await page.getByLabel("Carrito minimo").fill("10");
+  await page.getByLabel("Activo", { exact: true }).check();
+  await page.getByRole("button", { name: "Guardar cupon" }).click();
+  await expect(page.getByText(couponCode)).toBeVisible();
+  await page.locator("tr", { hasText: couponCode }).getByRole("button", { name: "Editar" }).click();
+  await page.getByLabel("Descripcion").fill("Cupon QA editado");
+  await page.getByLabel("Activo", { exact: true }).uncheck();
+  await page.getByRole("button", { name: "Guardar cupon" }).click();
+  await expect(page.locator("tr", { hasText: couponCode })).toContainText("false");
+
+  const bonusName = `Bonificacion QA ${suffix}`;
+  await page.goto(`${baseURL}/admin/bonificaciones`, { waitUntil: "networkidle" });
+  await page.getByLabel("Nombre", { exact: true }).fill(bonusName);
+  await page.getByLabel("Producto gratis / beneficio").fill("Muestra QA");
+  await page.getByLabel("Valor condicion").fill("10");
+  await page.getByLabel("Activa", { exact: true }).check();
+  await page.getByRole("button", { name: "Guardar" }).click();
+  await expect(page.getByText(bonusName)).toBeVisible();
+  await page.locator("tr", { hasText: bonusName }).getByRole("button", { name: "Editar" }).click();
+  await page.getByLabel("Producto gratis / beneficio").fill("Muestra QA editada");
+  await page.getByLabel("Activa", { exact: true }).uncheck();
+  await page.getByRole("button", { name: "Guardar" }).click();
+  await expect(page.locator("tr", { hasText: bonusName })).toContainText("false");
+
+  const notificationTitle = `Aviso QA ${suffix}`;
+  await page.goto(`${baseURL}/admin/notificaciones`, { waitUntil: "networkidle" });
+  await page.getByLabel("Titulo").fill(notificationTitle);
+  await page.getByLabel("Mensaje").fill("Hola {nombre}, promocion QA");
+  await page.getByLabel("Activa", { exact: true }).check();
+  await page.getByRole("button", { name: "Guardar" }).click();
+  await expect(page.getByText(notificationTitle)).toBeVisible();
+  await page.getByRole("button", { name: "Cerrar sesion" }).click();
+  await page.goto(baseURL, { waitUntil: "networkidle" });
+  await expect(page.getByText(notificationTitle)).toBeVisible({ timeout: 20000 });
 });

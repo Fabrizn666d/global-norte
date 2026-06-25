@@ -455,8 +455,8 @@ export function StoreApp({ route }: { route: string[] }) {
                 <img src={company.logoUrl || LOGO_IMAGE} alt={company.name} className="h-12 w-12 object-contain" />
               </span>
               <span className="hidden leading-tight sm:block">
-                <span className="block text-sm font-black uppercase text-[#D71920]">{company.name}</span>
-                <span className="block text-[11px] font-bold uppercase tracking-wide text-neutral-500">{company.legalName || "Distribuidora mayorista"}</span>
+                <span className="block text-sm font-black uppercase text-[#D71920]">GLOBAL NORTE</span>
+                <span className="block text-[11px] font-bold uppercase tracking-wide text-neutral-500">Mayorista B2B</span>
               </span>
             </Link>
 
@@ -862,9 +862,12 @@ function CatalogView({
 function FilterLink({ label, param }: { label: string; param: string }) {
   const searchParams = useSearchParams();
   const params = new URLSearchParams(searchParams.toString());
-  params.set(param, "1");
+  const active = searchParams.get(param) === "1";
+  if (active) params.delete(param);
+  else params.set(param, "1");
+  params.set("page", "1");
   return (
-    <Link href={`/catalogo?${params.toString()}`} className="rounded-full border border-neutral-200 bg-white px-4 py-2 text-xs font-black uppercase tracking-wide text-neutral-700 shadow-sm transition hover:border-[#D71920] hover:text-[#D71920]">
+    <Link href={`/catalogo?${params.toString()}`} className={`rounded-full border px-4 py-2 text-xs font-black uppercase tracking-wide shadow-sm transition ${active ? "border-[#D71920] bg-[#D71920] text-white" : "border-neutral-200 bg-white text-neutral-700 hover:border-[#D71920] hover:text-[#D71920]"}`}>
       {label}
     </Link>
   );

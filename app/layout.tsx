@@ -10,7 +10,7 @@ const jakarta = Plus_Jakarta_Sans({
 });
 
 export const metadata: Metadata = {
-  title: "Distribuidora Global Norte",
+  title: "GLOBAL NORTE",
   description: "Tienda online B2B para bodegas, tiendas y negocios.",
 };
 

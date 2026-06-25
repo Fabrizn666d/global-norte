@@ -66,6 +66,7 @@ const nav = [
   { href: "/admin/backups", label: "Backups", icon: Download },
   { href: "/admin/sistema", label: "Sistema", icon: Settings },
   { href: "/admin/clientes", label: "Clientes", icon: UsersRound },
+  { href: "/admin/administradores", label: "Administradores", icon: UsersRound },
   { href: "/admin/reportes", label: "Reportes", icon: BarChart3 },
   { href: "/admin/configuracion", label: "Configuracion", icon: Settings },
 ];
@@ -179,6 +180,7 @@ export function AdminApp({ route }: { route: string[] }) {
       if (active === "backups") setData(await api("/api/admin/backups"));
       if (active === "sistema") setData(await api("/api/admin/sistema"));
       if (active === "clientes") setData(await api(detailId ? `/api/admin/clientes/${detailId}` : "/api/admin/clientes"));
+      if (active === "administradores") setData(await api("/api/admin/administradores"));
       if (active === "reportes") {
         const [ventas, productos, categorias, inventario] = await Promise.all([
           api<AnyRow>("/api/admin/reportes/ventas"),
@@ -262,6 +264,7 @@ export function AdminApp({ route }: { route: string[] }) {
           {active === "backups" ? <Backups data={data} reload={loadData} /> : null}
           {active === "sistema" ? <SystemStatus data={data} /> : null}
           {active === "clientes" ? <Customers data={data} detailId={detailId} reload={loadData} /> : null}
+          {active === "administradores" ? <AdminUsers rows={data.admins ?? []} currentAdmin={admin} reload={loadData} /> : null}
           {active === "reportes" ? <Reports data={data} /> : null}
           {active === "configuracion" ? <SettingsView rows={data.settings ?? []} reload={loadData} /> : null}
         </div>
@@ -1199,6 +1202,79 @@ function Customers({ data, detailId, reload }: { data: AnyRow; detailId?: string
     <Panel title="Clientes">
       <DataTable rows={rows} columns={["nombre", "email", "telefono", "negocio", "pedidos", "totalComprado", "estado"]} linkPrefix="/admin/clientes" />
     </Panel>
+  );
+}
+
+function AdminUsers({ rows, currentAdmin, reload }: { rows: AnyRow[]; currentAdmin: Admin; reload: () => void }) {
+  const [editing, setEditing] = useState<AnyRow | null>(null);
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const raw = formData(event);
+    const payload = {
+      nombre: String(raw.nombre ?? ""),
+      email: String(raw.email ?? ""),
+      password: String(raw.password ?? ""),
+      rol: String(raw.rol ?? "admin"),
+      activo: raw.activo === "on",
+    };
+    await api(editing ? `/api/admin/administradores/${editing.id}` : "/api/admin/administradores", {
+      method: editing ? "PUT" : "POST",
+      body: JSON.stringify(payload),
+    });
+    toast.success(editing ? "Administrador actualizado" : "Administrador creado");
+    setEditing(null);
+    form.reset();
+    reload();
+  }
+  async function remove(row: AnyRow) {
+    if (row.id === currentAdmin.id) {
+      toast.error("No puedes eliminar tu propia cuenta activa");
+      return;
+    }
+    if (!window.confirm(`Eliminar administrador ${row.email}?`)) return;
+    await api(`/api/admin/administradores/${row.id}`, { method: "DELETE" });
+    toast.success("Administrador eliminado");
+    reload();
+  }
+  return (
+    <div className="grid gap-4">
+      <Panel title={editing ? "Editar administrador" : "Nuevo administrador"} help="Roles: superadmin controla cuentas y configuracion; editor puede apoyar catalogo; operador puede atender pedidos.">
+        <form key={editing?.id ?? "new"} onSubmit={submit} className="grid gap-3 md:grid-cols-5">
+          <Field name="nombre" label="Nombre" defaultValue={editing?.nombre ?? ""} required />
+          <Field name="email" label="Email" type="email" defaultValue={editing?.email ?? ""} required />
+          <Field name="password" label={editing ? "Nueva clave opcional" : "Clave"} type="password" minLength={8} required={!editing} />
+          <label className="grid gap-1 text-sm font-semibold text-neutral-700">
+            Rol
+            <select name="rol" defaultValue={editing?.rol ?? "admin"} className="h-10 rounded border border-neutral-300 bg-white px-3 text-sm font-normal">
+              <option value="superadmin">Superadmin</option>
+              <option value="admin">Admin</option>
+              <option value="editor">Editor</option>
+              <option value="operador">Operador</option>
+            </select>
+          </label>
+          <label className="mt-7 inline-flex items-center gap-2 text-sm font-bold">
+            <input name="activo" type="checkbox" defaultChecked={editing?.activo ?? true} /> Activo
+          </label>
+          <div className="flex gap-2 md:col-span-5">
+            <button className="h-10 rounded bg-[#D32F2F] px-4 text-sm font-bold text-white">Guardar cuenta</button>
+            {editing ? <button type="button" onClick={() => setEditing(null)} className="h-10 rounded border px-4 text-sm font-bold">Cancelar</button> : null}
+          </div>
+        </form>
+      </Panel>
+      <Panel title="Cuentas admin">
+        <DataTable
+          rows={rows.map((row) => ({ ...row, ultimoAcceso: row.ultimoAcceso ? new Date(row.ultimoAcceso).toLocaleString("es-PE") : "-", estado: row.activo ? "Activo" : "Inactivo" }))}
+          columns={["nombre", "email", "rol", "estado", "ultimoAcceso"]}
+          renderActions={(row) => (
+            <div className="flex gap-2">
+              <button onClick={() => setEditing(row)} className="rounded border px-2 py-1 text-xs font-bold">Editar</button>
+              <button onClick={() => remove(row)} className="rounded border border-red-200 px-2 py-1 text-xs font-bold text-red-600">Eliminar</button>
+            </div>
+          )}
+        />
+      </Panel>
+    </div>
   );
 }
 

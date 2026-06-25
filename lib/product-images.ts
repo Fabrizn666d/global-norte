@@ -26,13 +26,32 @@ export type ImageImportResult = {
   localPath?: string;
   status?: string;
   error?: string;
+  mode?: ImagePipelineMode;
+  queriesTried?: number;
+  elapsedMs?: number;
 };
+
+export type ImagePipelineMode = "default" | "fast" | "pending" | "deep" | "manual";
 
 export type ImageProcessOptions = {
   limit?: number;
   all?: boolean;
   retryErrors?: boolean;
   repairBroken?: boolean;
+  mode?: ImagePipelineMode;
+  concurrency?: number;
+  onProgress?: (progress: ImageQueueProgress) => void;
+};
+
+export type ImageQueueProgress = {
+  processed: number;
+  approved: number;
+  pending: number;
+  rejected: number;
+  total: number;
+  elapsedSeconds: number;
+  speedPerMinute: number;
+  etaMinutes: number | null;
 };
 
 const VALID_IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp", "image/avif"]);
@@ -245,6 +264,48 @@ function cleanProductName(name: string) {
     .replace(/\bDE\b/gi, "")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function presentationText(name: string) {
+  const matches = name.match(/\b\d+(?:[.,]\d+)?\s*(?:ml|lt|l|gr|g|kg|un|und|x\d+)\b/gi) ?? [];
+  return matches.map((item) => item.replace(/\s+/g, "")).join(" ");
+}
+
+function isAmbiguousProductName(name: string) {
+  return containsAny(normalize(name), ["anita", "cancha", "bandido", "oval", "puerto", "inka", "municion", "plumilla", "adulto", "agranel"]);
+}
+
+export async function productBrandDictionary() {
+  const brands = await prisma.brand.findMany({ where: { activo: true }, select: { nombre: true }, orderBy: { nombre: "asc" } });
+  return brands.map((brand) => brand.nombre).filter(Boolean);
+}
+
+function brandContextQueries(product: ProductWithImageContext, mode: ImagePipelineMode) {
+  const brand = product.brand?.nombre?.trim() ?? "";
+  const category = product.category?.nombre?.trim() ?? "";
+  const cleanName = cleanProductName(product.nombre);
+  const presentation = presentationText(product.nombre);
+  const name = normalize(product.nombre);
+  const brandName = normalize(brand);
+  const queries: string[] = [];
+
+  if (brandName.includes("anita")) queries.push("Anita alimentos Peru producto", "Anita fideos Peru producto", "Anita fideos presentacion comercial");
+  if (name.includes("cancha")) queries.push("maiz cancha snack bolsa producto Peru", "cancha chulpi maiz snack producto");
+  if (name.includes("bandido")) queries.push("Bandido snack bolsa producto Peru", "Bandido producto snack Peru");
+  if (/(oval|puerto|inka)/i.test(product.nombre)) queries.push(`${category} producto empacado Peru`, `${cleanName} producto abarrotes Peru`);
+  if (name.includes("hh ss")) queries.push("higiene personal sachet producto Peru", `${cleanName} shampoo sachet producto`);
+
+  if (brand) {
+    if (category) queries.push(`${brand} ${category} producto Peru`);
+    if (presentation) queries.push(`${brand} ${presentation} producto Peru`);
+    if (!isAmbiguousProductName(product.nombre)) queries.push(`${brand} ${cleanName} producto Peru`);
+    queries.push(`${brand} producto Peru`);
+  }
+  if (category) queries.push(`${category} producto empacado Peru`);
+  if (mode !== "fast" && !isAmbiguousProductName(product.nombre)) queries.push(`${cleanName} producto Peru`, `${cleanName} imagen producto`);
+  if (mode === "deep") queries.push(product.nombre, `${product.nombre} Peru`, `${product.nombre} ${brand} producto`, product.codigoInterno);
+
+  return queries.filter((query, index, arr) => query.trim() && arr.indexOf(query) === index);
 }
 
 function productContextText(product: ProductWithImageContext, candidate: Pick<ImageCandidateInput, "imageUrlOriginal" | "sourceUrl" | "sourceName">, query?: string) {
@@ -503,7 +564,7 @@ async function logImageAttempt(input: {
   }).catch(() => undefined);
 }
 
-async function sourceProductImages(product: ProductWithImageContext, query: string) {
+async function sourceProductImages(product: ProductWithImageContext, query: string, mode: ImagePipelineMode = "default") {
   const before = new Set<string>();
   const candidates: ImageCandidateInput[] = [];
   async function collect(sourceName: string, provider: () => Promise<ImageCandidateInput[]>) {
@@ -519,10 +580,17 @@ async function sourceProductImages(product: ProductWithImageContext, query: stri
       await logImageAttempt({ productId: product.id, query, sourceName, result: "provider_error", error: error instanceof Error ? error.message : "Error proveedor" });
     }
   }
-  await collect("configured_endpoint", () => searchEndpoint(product, query));
-  await collect("bing_api", () => searchBing(product, query));
-  await collect("bing_html", () => searchBingHtml(product, query));
-  await collect("duckduckgo", () => searchDuckDuckGo(product, query));
+  const providers = [
+    ["configured_endpoint", () => searchEndpoint(product, query)] as const,
+    ["bing_api", () => searchBing(product, query)] as const,
+    ["bing_html", () => searchBingHtml(product, query)] as const,
+    ["duckduckgo", () => searchDuckDuckGo(product, query)] as const,
+  ];
+  const sourceLimit = mode === "fast" ? 2 : mode === "pending" ? 3 : providers.length;
+  for (const [sourceName, provider] of providers.slice(0, sourceLimit)) {
+    await collect(sourceName, provider);
+    if (mode === "fast" && candidates.some((item) => Number(item.confidence ?? 0) >= AUTO_APPROVE_THRESHOLD)) break;
+  }
   return candidates;
 }
 
@@ -535,6 +603,8 @@ export async function ensureImageJobs() {
     if (!existing) {
       await prisma.productImageJob.create({ data: { productId: product.id, status: "pending" } });
       created += 1;
+    } else if (existing.status === "completed") {
+      await prisma.productImageJob.update({ where: { id: existing.id }, data: { status: "pending", completedAt: null, nextRunAt: new Date(), lastError: "Producto sigue sin imagen aprobada" } });
     }
   }
   return created;
@@ -546,18 +616,44 @@ function nextRetryDate(attempts: number) {
   return date;
 }
 
-async function processProductImageJob(job: ProductImageJob) {
+function queryLimitForMode(mode: ImagePipelineMode) {
+  if (mode === "fast") return 4;
+  if (mode === "pending") return 8;
+  if (mode === "manual") return 0;
+  return 100;
+}
+
+async function processProductImageJob(job: ProductImageJob, mode: ImagePipelineMode = "default") {
+  const startedAt = Date.now();
   const product = await prisma.product.findUnique({ where: { id: job.productId }, include: { brand: true, category: true } });
   if (!product) throw new Error("Producto no existe");
   if (!(await productNeedsImage(product))) {
     await prisma.productImageJob.update({ where: { id: job.id }, data: { status: "completed", completedAt: new Date(), lastError: null } });
-    return { codigoInterno: product.codigoInterno, ok: true, skipped: true, status: "completed" };
+    return { codigoInterno: product.codigoInterno, ok: true, skipped: true, status: "completed", mode, elapsedMs: Date.now() - startedAt };
+  }
+  const queries = mode === "default" ? queriesForProduct(product) : brandContextQueries(product, mode);
+  if (mode === "manual") {
+    const reason = job.lastError ?? "Pendiente de revision manual o busqueda profunda";
+    return {
+      codigoInterno: product.codigoInterno,
+      ok: false,
+      mode,
+      error: `${product.nombre}: ${reason}. Sugerencia: revisar fuente oficial de marca/categoria (${product.brand?.nombre ?? "sin marca"} / ${product.category?.nombre ?? "sin categoria"}).`,
+      queriesTried: 0,
+      elapsedMs: Date.now() - startedAt,
+    };
   }
   await prisma.productImageJob.update({ where: { id: job.id }, data: { status: "processing", lastRunAt: new Date(), attempts: { increment: 1 } } });
   let lastError = "Sin candidato encontrado";
-  for (const query of queriesForProduct(product)) {
-    const candidates = (await sourceProductImages(product, query)).sort((a, b) => (b.confidence ?? 0) - (a.confidence ?? 0));
+  let queriesTried = 0;
+  for (const query of queries.slice(0, queryLimitForMode(mode))) {
+    queriesTried += 1;
+    const candidates = (await sourceProductImages(product, query, mode)).sort((a, b) => (b.confidence ?? 0) - (a.confidence ?? 0));
     for (const candidate of candidates) {
+      if (mode === "fast" && Number(candidate.confidence ?? 0) < AUTO_APPROVE_THRESHOLD) {
+        lastError = "FAST: candidato bajo umbral, enviado a pending";
+        continue;
+      }
       try {
         const saved = await saveCandidate(product, candidate);
         await logImageAttempt({
@@ -571,8 +667,13 @@ async function processProductImageJob(job: ProductImageJob) {
           localPath: saved.localPath,
           contentHash: saved.contentHash,
         });
+        if (saved.status === "pending") {
+          const message = "Candidato descargado pendiente de aprobacion manual";
+          await prisma.productImageJob.update({ where: { id: job.id }, data: { status: "pending", lastError: message, nextRunAt: mode === "deep" ? nextRetryDate(job.attempts + 1) : new Date() } });
+          return { codigoInterno: product.codigoInterno, ok: false, localPath: saved.localPath ?? undefined, status: saved.status, error: message, mode, queriesTried, elapsedMs: Date.now() - startedAt };
+        }
         await prisma.productImageJob.update({ where: { id: job.id }, data: { status: "completed", completedAt: new Date(), lastError: null, nextRunAt: null } });
-        return { codigoInterno: product.codigoInterno, ok: true, localPath: saved.localPath ?? undefined, status: saved.status };
+        return { codigoInterno: product.codigoInterno, ok: true, localPath: saved.localPath ?? undefined, status: saved.status, mode, queriesTried, elapsedMs: Date.now() - startedAt };
       } catch (error) {
         lastError = error instanceof Error ? error.message : "Error al descargar candidato";
         await logImageAttempt({
@@ -590,8 +691,15 @@ async function processProductImageJob(job: ProductImageJob) {
   }
   const freshJob = await prisma.productImageJob.findUnique({ where: { id: job.id } });
   const attempts = (freshJob?.attempts ?? job.attempts + 1);
-  await prisma.productImageJob.update({ where: { id: job.id }, data: { status: "pending", lastError, nextRunAt: nextRetryDate(attempts) } });
-  return { codigoInterno: product.codigoInterno, ok: false, error: lastError };
+  await prisma.productImageJob.update({
+    where: { id: job.id },
+    data: {
+      status: "pending",
+      lastError,
+      nextRunAt: mode === "fast" ? new Date() : nextRetryDate(attempts),
+    },
+  });
+  return { codigoInterno: product.codigoInterno, ok: false, error: lastError, mode, queriesTried, elapsedMs: Date.now() - startedAt };
 }
 
 export async function imageStatus() {
@@ -684,12 +792,18 @@ export async function qualityFixImages() {
 export async function processImageQueue(options: ImageProcessOptions = {}) {
   const startedAt = Date.now();
   await ensureImageJobs();
+  const mode = options.mode ?? "default";
   const limit = options.all ? 10000 : Math.max(1, Math.min(500, Number(options.limit ?? 50)));
   const now = new Date();
   const jobs = await prisma.productImageJob.findMany({
     where: {
       OR: [
-        { status: "pending", OR: [{ nextRunAt: null }, { nextRunAt: { lte: now } }] },
+        {
+          status: "pending",
+          OR: mode === "fast" || mode === "pending" || mode === "deep"
+            ? [{ nextRunAt: null }, { nextRunAt: { lte: now } }, { nextRunAt: { gt: now } }]
+            : [{ nextRunAt: null }, { nextRunAt: { lte: now } }],
+        },
         ...(options.retryErrors ? [{ status: "error" }] : []),
       ],
     },
@@ -697,7 +811,42 @@ export async function processImageQueue(options: ImageProcessOptions = {}) {
     take: limit,
   });
   const results: ImageImportResult[] = [];
-  for (const job of jobs) results.push(await processProductImageJob(job));
+  let cursor = 0;
+  const concurrency = Math.max(1, Math.min(30, Number(options.concurrency ?? (mode === "fast" ? 10 : mode === "deep" ? 3 : 5))));
+  const progress = { processed: 0, approved: 0, pending: 0, rejected: 0 };
+  const emitProgress = () => {
+    const elapsedSeconds = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
+    const speedPerMinute = Math.round((progress.processed / elapsedSeconds) * 60);
+    options.onProgress?.({
+      processed: progress.processed,
+      approved: progress.approved,
+      pending: progress.pending,
+      rejected: progress.rejected,
+      total: jobs.length,
+      elapsedSeconds,
+      speedPerMinute,
+      etaMinutes: progress.processed ? Math.ceil(((jobs.length - progress.processed) / Math.max(1, progress.processed / elapsedSeconds)) / 60) : null,
+    });
+  };
+  async function worker() {
+    while (cursor < jobs.length) {
+      const job = jobs[cursor];
+      cursor += 1;
+      const result: ImageImportResult = await processProductImageJob(job, mode).catch((error) => ({
+        codigoInterno: job.productId,
+        ok: false,
+        mode,
+        error: error instanceof Error ? error.message : "Error procesando job",
+      } satisfies ImageImportResult));
+      results.push(result);
+      progress.processed += 1;
+      if (result.ok && result.localPath) progress.approved += 1;
+      else if (result.status === "rejected" || result.error?.includes("rechazada")) progress.rejected += 1;
+      else progress.pending += 1;
+      emitProgress();
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(concurrency, jobs.length) }, () => worker()));
   const populated = results.filter((item) => item.ok && item.localPath).length;
   const elapsedSeconds = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
   const status = await imageStatus();

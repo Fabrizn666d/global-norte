@@ -63,6 +63,14 @@ const loginSchema = z.object({
   password: z.string().min(1),
 });
 
+const adminUserSchema = z.object({
+  nombre: z.string().min(2),
+  email: z.string().email(),
+  password: z.string().min(8).optional().or(z.literal("")),
+  rol: z.enum(["superadmin", "admin", "editor", "operador"]).default("admin"),
+  activo: z.boolean().default(true),
+});
+
 const checkoutSchema = z.object({
   captchaToken: z.string().optional(),
   metodoPago: z.enum(["efectivo", "transferencia", "yape", "plin"]).default("efectivo"),
@@ -283,6 +291,9 @@ function productWhere(search: URLSearchParams, includeInactive = false): Prisma.
   const precioMin = precioMinParam ? Number(precioMinParam) : Number.NaN;
   const precioMax = precioMaxParam ? Number(precioMaxParam) : Number.NaN;
   const where: Prisma.ProductWhereInput = includeInactive ? {} : { activo: true };
+  const addAnd = (filter: Prisma.ProductWhereInput) => {
+    where.AND = [...(Array.isArray(where.AND) ? where.AND : where.AND ? [where.AND] : []), filter];
+  };
 
   if (q) {
     where.OR = [
@@ -295,11 +306,11 @@ function productWhere(search: URLSearchParams, includeInactive = false): Prisma.
   if (categoria) where.category = { slug: categoria };
   if (marca) where.brand = { slug: marca };
   if (search.get("disponible") === "1") where.stock = { gt: 0 };
-  if (search.get("oferta") === "1") where.enOferta = true;
+  if (search.get("oferta") === "1") addAnd({ OR: [{ enOferta: true }, { etiquetaDestacada: "oferta" }, { precioAnterior: { not: null } }, { destacado: true }] });
   if (search.get("destacado") === "1") where.destacado = true;
   if (search.get("home") === "1") {
     delete where.destacado;
-    where.AND = [{ OR: [{ mostrarEnHome: true }, { destacado: true }] }];
+    addAnd({ OR: [{ mostrarEnHome: true }, { destacado: true }] });
   }
   if (search.get("nuevo") === "1") where.nuevo = true;
   if (!Number.isNaN(precioMin) || !Number.isNaN(precioMax)) {
@@ -1009,6 +1020,13 @@ async function adminGet(request: NextRequest, segments: string[]) {
 
   if (!first || first === "dashboard" || (first === "reportes" && second === "dashboard")) return ok(await dashboardReport());
   if (first === "sistema" || first === "system") return ok(await systemStatus());
+  if (first === "administradores") {
+    const admins = await prisma.adminUser.findMany({
+      orderBy: [{ rol: "asc" }, { createdAt: "desc" }],
+      select: { id: true, nombre: true, email: true, rol: true, activo: true, ultimoAcceso: true, createdAt: true },
+    });
+    return ok({ admins });
+  }
   if (first === "pedidos") {
     if (second === "export") return exportOrders(request);
     if (second && third === "pdf") return adminOrderPdf(second);
@@ -1071,7 +1089,7 @@ async function adminPost(request: NextRequest, segments: string[]) {
       return fail("Credenciales invalidas", 401);
     }
     await prisma.adminUser.update({ where: { id: admin.id }, data: { ultimoAcceso: new Date() } });
-    await prisma.rateLimit.delete({ where: { ip_accion: { ip, accion: "admin_login" } } }).catch(() => null);
+    await prisma.rateLimit.delete({ where: { ip_accion: { ip: getIp(request), accion: "admin_login" } } }).catch(() => null);
     const response = ok({ admin: { ...admin, password: undefined } });
     await setSessionCookie(response, { id: admin.id, email: admin.email, role: admin.rol, kind: "admin" });
     return response;
@@ -1213,6 +1231,24 @@ async function adminPost(request: NextRequest, segments: string[]) {
     const type = asString(body.tipo, "complete") as BackupType;
     if (!["database", "uploads", "pdfs", "complete"].includes(type)) return fail("Tipo de backup invalido", 400);
     return ok({ backup: await generateBackup(type, session.id) }, { status: 201 });
+  }
+
+  if (first === "administradores") {
+    if (session.role !== "superadmin") return fail("Solo superadmin puede administrar cuentas", 403);
+    const data = adminUserSchema.parse(await readJson(request));
+    if (!data.password) return fail("La contrasena es obligatoria para crear administrador", 422);
+    const admin = await prisma.adminUser.create({
+      data: {
+        nombre: data.nombre.trim(),
+        email: data.email.trim().toLowerCase(),
+        password: await bcrypt.hash(data.password, 12),
+        rol: data.rol,
+        activo: data.activo,
+      },
+      select: { id: true, nombre: true, email: true, rol: true, activo: true, ultimoAcceso: true, createdAt: true },
+    });
+    await prisma.activityLog.create({ data: { userId: session.id, accion: "crear", modulo: "administradores", detalle: admin.email, ip } });
+    return ok({ admin }, { status: 201 });
   }
 
   if (rawFirst === "catalogo" && (rawSecond === "import" || rawSecond === "importar" || rawSecond === "sincronizar")) {
@@ -1362,6 +1398,34 @@ async function adminPut(request: NextRequest, segments: string[]) {
   segments = normalizeSegments(segments);
   const [first, second, third] = segments;
   const body = await readJson(request);
+
+  if (first === "administradores" && second) {
+    if (session.role !== "superadmin") return fail("Solo superadmin puede administrar cuentas", 403);
+    const data = adminUserSchema.partial().parse(body);
+    const target = await prisma.adminUser.findUnique({ where: { id: second } });
+    if (!target) return fail("Administrador no encontrado", 404);
+    if (target.rol === "superadmin" && data.rol && data.rol !== "superadmin") {
+      const totalSuper = await prisma.adminUser.count({ where: { rol: "superadmin", activo: true } });
+      if (totalSuper <= 1) return fail("No puedes quitar el ultimo superadmin activo", 400);
+    }
+    if (target.rol === "superadmin" && data.activo === false) {
+      const totalSuper = await prisma.adminUser.count({ where: { rol: "superadmin", activo: true } });
+      if (totalSuper <= 1) return fail("No puedes desactivar el ultimo superadmin activo", 400);
+    }
+    const updateData: Prisma.AdminUserUpdateInput = {};
+    if (data.nombre !== undefined) updateData.nombre = data.nombre.trim();
+    if (data.email !== undefined) updateData.email = data.email.trim().toLowerCase();
+    if (data.rol !== undefined) updateData.rol = data.rol;
+    if (data.activo !== undefined) updateData.activo = data.activo;
+    if (data.password) updateData.password = await bcrypt.hash(data.password, 12);
+    const admin = await prisma.adminUser.update({
+      where: { id: second },
+      data: updateData,
+      select: { id: true, nombre: true, email: true, rol: true, activo: true, ultimoAcceso: true, createdAt: true },
+    });
+    await prisma.activityLog.create({ data: { userId: session.id, accion: "actualizar", modulo: "administradores", detalle: admin.email } });
+    return ok({ admin });
+  }
 
   if (first === "pedidos" && second && (third === "estado" || third === "status")) {
     const estado = asString(body.estado);
@@ -1551,6 +1615,19 @@ async function adminDelete(request: NextRequest, segments: string[]) {
   if (!session) return fail("No autorizado", 401);
   segments = normalizeSegments(segments);
   const [first, second] = segments;
+  if (first === "administradores" && second) {
+    if (session.role !== "superadmin") return fail("Solo superadmin puede administrar cuentas", 403);
+    const target = await prisma.adminUser.findUnique({ where: { id: second } });
+    if (!target) return fail("Administrador no encontrado", 404);
+    if (target.id === session.id) return fail("No puedes eliminar tu propia cuenta activa", 400);
+    if (target.rol === "superadmin") {
+      const totalSuper = await prisma.adminUser.count({ where: { rol: "superadmin", activo: true } });
+      if (totalSuper <= 1) return fail("No puedes eliminar el ultimo superadmin activo", 400);
+    }
+    await prisma.adminUser.delete({ where: { id: second } });
+    await prisma.activityLog.create({ data: { userId: session.id, accion: "eliminar", modulo: "administradores", detalle: target.email } });
+    return ok({ ok: true });
+  }
   if (first === "productos" && second) {
     await prisma.product.delete({ where: { id: second } });
     return ok({ ok: true });

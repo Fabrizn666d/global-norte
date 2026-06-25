@@ -1013,3 +1013,85 @@ export async function retryProductImageSearch(productId: string) {
 export type ProductImageCandidateWithProduct = Prisma.ProductImageCandidateGetPayload<{
   include: { product: { include: { brand: true; category: true } } };
 }>;
+
+export async function promotePendingImages(options: { minConfidence?: number; brandMatch?: boolean; dryRun?: boolean } = {}) {
+  const minConfidence = Math.max(0, Math.min(100, Number(options.minConfidence ?? 95)));
+  const candidates = await prisma.productImageCandidate.findMany({
+    where: {
+      status: "pending",
+      confidence: { gte: minConfidence },
+      localPath: { not: null },
+    },
+    include: { product: { include: { brand: true, category: true, imageIssues: { where: { status: "suspected" }, take: 1 } } } },
+    orderBy: [{ confidence: "desc" }, { createdAt: "desc" }],
+  });
+  const promoted: Array<{ codigoInterno: string; nombre: string; localPath: string; confidence: number }> = [];
+  const skipped: Array<{ codigoInterno: string; nombre: string; localPath: string | null; reason: string; confidence: number }> = [];
+
+  for (const candidate of candidates) {
+    const product = candidate.product;
+    const localPath = candidate.localPath;
+    if (!localPath) {
+      skipped.push({ codigoInterno: product.codigoInterno, nombre: product.nombre, localPath, reason: "Sin localPath", confidence: candidate.confidence });
+      continue;
+    }
+    if (!(await productNeedsImage(product))) {
+      skipped.push({ codigoInterno: product.codigoInterno, nombre: product.nombre, localPath, reason: "Producto ya tiene imagen confiable", confidence: candidate.confidence });
+      continue;
+    }
+    if (!(await localImageExists(localPath))) {
+      skipped.push({ codigoInterno: product.codigoInterno, nombre: product.nombre, localPath, reason: "Archivo local no existe", confidence: candidate.confidence });
+      continue;
+    }
+    if (product.imageIssues.length) {
+      skipped.push({ codigoInterno: product.codigoInterno, nombre: product.nombre, localPath, reason: "Tiene issue sospechoso activo", confidence: candidate.confidence });
+      continue;
+    }
+    const assessment = imageQualityAssessment(product, {
+      imageUrlOriginal: candidate.imageUrlOriginal,
+      sourceUrl: candidate.sourceUrl,
+      sourceName: candidate.sourceName,
+      confidence: candidate.confidence,
+    });
+    if (!assessment.ok) {
+      skipped.push({ codigoInterno: product.codigoInterno, nombre: product.nombre, localPath, reason: assessment.reason || "No paso reglas de calidad", confidence: candidate.confidence });
+      continue;
+    }
+    if (options.brandMatch && product.brand?.nombre && !normalize(`${candidate.imageUrlOriginal} ${candidate.sourceUrl ?? ""} ${candidate.sourceName}`).includes(normalize(product.brand.nombre))) {
+      skipped.push({ codigoInterno: product.codigoInterno, nombre: product.nombre, localPath, reason: "No coincide la marca requerida", confidence: candidate.confidence });
+      continue;
+    }
+    const currentImages = (() => {
+      try {
+        const parsed = JSON.parse(product.imagenes || "[]");
+        return Array.isArray(parsed) ? parsed.filter((item) => typeof item === "string") : [];
+      } catch {
+        return [];
+      }
+    })();
+    const nextImages = Array.from(new Set([localPath, ...currentImages]));
+    if (!options.dryRun) {
+      await prisma.$transaction([
+        prisma.product.update({ where: { id: product.id }, data: { imagenPrincipal: localPath, imagenes: JSON.stringify(nextImages) } }),
+        prisma.productImageCandidate.update({ where: { id: candidate.id }, data: { status: "approved", error: null } }),
+        prisma.productImageJob.upsert({
+          where: { productId: product.id },
+          create: { productId: product.id, status: "completed", completedAt: new Date(), lastError: null, nextRunAt: null },
+          update: { status: "completed", completedAt: new Date(), lastError: null, nextRunAt: null },
+        }),
+      ]);
+    }
+    promoted.push({ codigoInterno: product.codigoInterno, nombre: product.nombre, localPath, confidence: candidate.confidence });
+  }
+
+  return {
+    minConfidence,
+    brandMatch: Boolean(options.brandMatch),
+    dryRun: Boolean(options.dryRun),
+    scanned: candidates.length,
+    promoted: promoted.length,
+    skipped: skipped.length,
+    promotedItems: promoted,
+    skippedItems: skipped,
+  };
+}

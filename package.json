@@ -16,6 +16,7 @@
     "images:import": "tsx scripts/import-product-images.ts",
     "images:quality-audit": "tsx scripts/quality-audit-images.ts",
     "images:quality-fix": "tsx scripts/quality-fix-images.ts",
+    "images:promote": "tsx scripts/promote-product-images.ts",
     "images:status": "tsx scripts/image-status.ts",
     "catalog:classify": "tsx scripts/classify-catalog.ts",
     "db:reset": "prisma migrate reset --force && npm run db:seed",

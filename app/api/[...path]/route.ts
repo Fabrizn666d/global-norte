@@ -26,6 +26,8 @@ import {
   imageStatus,
   importProductImageCsv,
   processImageQueue,
+  qualityAuditImages,
+  qualityFixImages,
   registerManualProductImage,
   rejectImageCandidate,
   retryProductImageSearch,
@@ -1247,6 +1249,32 @@ async function adminPost(request: NextRequest, segments: string[]) {
         }
       }
       return ok(await processImageQueue({ limit: 100, retryErrors: true }), { status: 201 });
+    }
+    if (second === "quality-audit") {
+      return ok(await qualityAuditImages(), { status: 201 });
+    }
+    if (second === "quality-fix") {
+      return ok(await qualityFixImages(), { status: 201 });
+    }
+    if (second === "sospechosas" && third) {
+      const body = await readJson(request);
+      const issue = await prisma.productImageQualityIssue.findUnique({ where: { id: third }, include: { product: true } });
+      if (!issue) return fail("Sospecha no encontrada", 404);
+      const action = asString(body.action);
+      if (action === "aprobar") {
+        await prisma.productImageQualityIssue.update({ where: { id: issue.id }, data: { status: "approved", reviewedAt: new Date(), reviewedBy: session.id } });
+        if (issue.localPath) await prisma.productImageCandidate.updateMany({ where: { productId: issue.productId, localPath: issue.localPath }, data: { status: "approved", error: null } });
+        return ok({ ok: true });
+      }
+      if (["rechazar", "sin-imagen", "reintentar"].includes(action)) {
+        await prisma.product.update({ where: { id: issue.productId }, data: { imagenPrincipal: null, imagenes: "[]" } });
+        if (issue.localPath) await prisma.productImageCandidate.updateMany({ where: { productId: issue.productId, localPath: issue.localPath }, data: { status: "rejected", error: issue.reason } });
+        await prisma.productImageQualityIssue.update({ where: { id: issue.id }, data: { status: action === "rechazar" ? "rejected" : "resolved", reviewedAt: new Date(), reviewedBy: session.id } });
+        await prisma.productImageJob.upsert({ where: { productId: issue.productId }, create: { productId: issue.productId, status: "pending", priority: 30, nextRunAt: new Date(), lastError: issue.reason }, update: { status: "pending", priority: 30, nextRunAt: new Date(), lastError: issue.reason } });
+        if (action === "reintentar") return ok({ candidate: await retryProductImageSearch(issue.productId) });
+        return ok({ ok: true });
+      }
+      return fail("Accion invalida", 400);
     }
     if (second === "importar-csv") {
       const contentType = request.headers.get("content-type") ?? "";

@@ -39,7 +39,7 @@ const VALID_IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp", "ima
 const AUTO_DIR = path.join(process.cwd(), "public", "uploads", "products", "auto");
 const MAX_DOWNLOAD_BYTES = Number(process.env.PRODUCT_IMAGE_MAX_BYTES ?? 8 * 1024 * 1024);
 const DOWNLOAD_TIMEOUT = Number(process.env.PRODUCT_IMAGE_TIMEOUT_MS ?? 15000);
-const AUTO_APPROVE_THRESHOLD = Number(process.env.PRODUCT_IMAGE_AUTO_APPROVE_THRESHOLD ?? 68);
+const AUTO_APPROVE_THRESHOLD = Number(process.env.PRODUCT_IMAGE_AUTO_APPROVE_THRESHOLD ?? 92);
 const MIN_IMAGE_WIDTH = Number(process.env.PRODUCT_IMAGE_MIN_WIDTH ?? 240);
 const MIN_IMAGE_HEIGHT = Number(process.env.PRODUCT_IMAGE_MIN_HEIGHT ?? 240);
 
@@ -217,9 +217,94 @@ export async function downloadProductImage(product: Pick<Product, "id" | "codigo
   return { localPath, contentHash, width: metadata.width, height: metadata.height, fileSize: stat.size };
 }
 
+const NEGATIVE_IMAGE_TERMS = [
+  "mujer", "hombre", "persona", "personas", "rostro", "face", "selfie", "modelo", "actriz", "actor", "celebridad", "biografia",
+  "paisaje", "turismo", "turistico", "playa", "montana", "montaña", "hotel", "resort", "viaje", "travel", "ruinas", "parque",
+  "cancha deportiva", "futbol", "football", "estadio", "deporte", "deportivo", "basket", "voley", "tenis",
+  "casa", "edificio", "arquitectura", "interior", "habitacion", "mueble", "sofa", "mesa", "silla", "decoracion",
+  "meme", "poster", "pelicula", "movie", "cartel", "wallpaper", "youtube", "thumbnail", "video", "trailer",
+  "auto", "carro", "vehiculo", "moto", "mapa", "logo", "logotipo", "favicon", "sprite", "placeholder",
+];
+
+const POSITIVE_PRODUCT_TERMS = [
+  "producto", "pack", "presentacion", "presentación", "sachet", "sobre", "botella", "bolsa", "caja", "lata", "envase",
+  "display", "unidad", "supermercado", "tienda", "abarrotes", "mayorista", "comprar", "venta", "precio",
+  "plazavea", "plaza vea", "tottus", "wong", "metro", "vivanda", "makro", "mayorsa", "promart", "vea",
+  "alicorp", "molitalia", "sibarita", "anita", "gloria", "sapolio", "bolivar", "colgate", "procter", "unilever",
+];
+
+function containsAny(haystack: string, terms: string[]) {
+  return terms.some((term) => haystack.includes(normalize(term)));
+}
+
+function cleanProductName(name: string) {
+  return name
+    .replace(/\bAGRANEL\b/gi, "")
+    .replace(/\bADULTO\b/gi, "")
+    .replace(/\bEXTRA\b/gi, "")
+    .replace(/\bDE\b/gi, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function productContextText(product: ProductWithImageContext, candidate: Pick<ImageCandidateInput, "imageUrlOriginal" | "sourceUrl" | "sourceName">, query?: string) {
+  return normalize([
+    product.nombre,
+    product.brand?.nombre,
+    product.category?.nombre,
+    candidate.imageUrlOriginal,
+    candidate.sourceUrl,
+    candidate.sourceName,
+    query,
+  ].filter(Boolean).join(" "));
+}
+
+export function imageQualityAssessment(product: ProductWithImageContext, candidate: Pick<ImageCandidateInput, "imageUrlOriginal" | "sourceUrl" | "sourceName" | "confidence">, query?: string) {
+  const text = productContextText(product, candidate, query);
+  const candidateOnly = normalize(`${candidate.imageUrlOriginal} ${candidate.sourceUrl ?? ""} ${candidate.sourceName}`);
+  const reasons: string[] = [];
+  if (containsAny(candidateOnly, NEGATIVE_IMAGE_TERMS)) reasons.push("Fuente contiene señales de persona/paisaje/deporte/mueble/cartel/logo");
+  if (normalize(product.brand?.nombre).includes("anita") && containsAny(candidateOnly, ["mujer", "rostro", "modelo", "biografia", "actriz"])) reasons.push("Marca Anita con resultado de persona");
+  if (normalize(product.nombre).includes("cancha") && containsAny(candidateOnly, ["futbol", "estadio", "deportivo", "grass", "sports"])) reasons.push("Cancha interpretada como campo deportivo");
+  if (/(oval|puerto|inka)/i.test(product.nombre) && containsAny(candidateOnly, ["turismo", "hotel", "playa", "viaje", "ruinas", "paisaje"])) reasons.push("Resultado turistico para nombre ambiguo");
+  if (normalize(product.nombre).includes("bandido") && containsAny(candidateOnly, ["disfraz", "costume", "halloween", "persona", "pelicula"])) reasons.push("Bandido interpretado como disfraz/persona");
+  if (normalize(product.nombre).includes("porcor") && containsAny(candidateOnly, ["mueble", "sofa", "mesa", "silla"])) reasons.push("Resultado de muebles");
+
+  const tokens = productTokens(product).filter((token) => !["anita", "cancha", "bandido", "oval", "puerto", "inka"].includes(token));
+  const matched = tokens.filter((token) => candidateOnly.includes(token)).length;
+  const brandMatch = product.brand?.nombre ? candidateOnly.includes(normalize(product.brand.nombre)) : false;
+  const positive = containsAny(candidateOnly, POSITIVE_PRODUCT_TERMS);
+  const contextualPositive = containsAny(text, POSITIVE_PRODUCT_TERMS);
+  const relevance = Math.min(100, (matched * 18) + (brandMatch ? 24 : 0) + (positive ? 24 : 0) + Math.min(20, Number(candidate.confidence ?? 0) / 5));
+  if (tokens.length && matched === 0 && !brandMatch) reasons.push("No coincide con tokens fuertes del producto/marca");
+  if (!positive && (!contextualPositive || relevance < 92)) reasons.push("No hay señales suficientes de producto empacado");
+  return {
+    ok: reasons.length === 0,
+    autoApprovable: reasons.length === 0 && relevance >= 88 && Number(candidate.confidence ?? 0) >= AUTO_APPROVE_THRESHOLD,
+    relevance: Math.round(relevance),
+    reason: reasons.join("; "),
+  };
+}
+
 export async function saveCandidate(product: ProductWithImageContext, input: ImageCandidateInput, updateProduct = true) {
   const confidence = Math.max(0, Math.min(100, Number(input.confidence ?? 0)));
-  const status = input.status ?? (confidence >= AUTO_APPROVE_THRESHOLD ? "auto_approved" : "pending");
+  const quality = imageQualityAssessment(product, input);
+  if (!quality.ok && input.status !== "approved") {
+    await prisma.productImageCandidate.create({
+      data: {
+        productId: product.id,
+        imageUrlOriginal: input.imageUrlOriginal,
+        localPath: input.localPath ?? null,
+        sourceUrl: input.sourceUrl || input.imageUrlOriginal,
+        sourceName: input.sourceName,
+        confidence,
+        status: "rejected",
+        error: quality.reason,
+      },
+    }).catch(() => undefined);
+    throw new Error(`Imagen rechazada por calidad: ${quality.reason}`);
+  }
+  const status = input.status ?? (quality.autoApprovable ? "auto_approved" : "pending");
   const downloaded = input.localPath
     ? { localPath: input.localPath, contentHash: null, width: null, height: null, fileSize: null }
     : await downloadProductImage(product, input.imageUrlOriginal, input.sourceName);
@@ -237,6 +322,7 @@ export async function saveCandidate(product: ProductWithImageContext, input: Ima
       width: downloaded.width,
       height: downloaded.height,
       fileSize: downloaded.fileSize,
+      error: status === "pending" ? `Pendiente por confianza/calidad. Relevancia ${quality.relevance}` : null,
     },
   });
   if (updateProduct && (status === "auto_approved" || status === "approved")) {
@@ -303,17 +389,18 @@ async function searchBingHtml(product: ProductWithImageContext, query: string): 
   }, 12000);
   const decoded = decodeHtml(html);
   const results: ImageCandidateInput[] = [];
-  const regex = /"purl":"(.*?)".{0,1200}?"murl":"(.*?)"|"murl":"(.*?)".{0,1200}?"purl":"(.*?)"/g;
+  const regex = /\{[^{}]{0,2500}?"purl":"(.*?)"[^{}]{0,2500}?"murl":"(.*?)"[^{}]{0,2500}?\}|\{[^{}]{0,2500}?"murl":"(.*?)"[^{}]{0,2500}?"purl":"(.*?)"[^{}]{0,2500}?\}/g;
   let match: RegExpExecArray | null;
   while ((match = regex.exec(decoded)) && results.length < 8) {
     const sourceUrl = decodeHtml(match[1] || match[4] || "");
     const imageUrlOriginal = decodeHtml(match[2] || match[3] || "");
     if (!imageUrlOriginal || rejectExternalImage(imageUrlOriginal)) continue;
+    const title = decodeHtml(match[0].match(/"t":"(.*?)"/)?.[1] ?? "");
     const sourceName = (() => {
       try {
-        return `Bing HTML: ${new URL(sourceUrl).hostname.replace(/^www\./, "")}`;
+        return `Bing HTML: ${new URL(sourceUrl).hostname.replace(/^www\./, "")}${title ? ` - ${title.slice(0, 90)}` : ""}`;
       } catch {
-        return "Bing HTML";
+        return title ? `Bing HTML - ${title.slice(0, 90)}` : "Bing HTML";
       }
     })();
     results.push({
@@ -354,15 +441,24 @@ async function searchDuckDuckGo(product: ProductWithImageContext, query: string)
 
 export function queriesForProduct(product: ProductWithImageContext) {
   const brand = product.brand?.nombre ? ` ${product.brand.nombre}` : "";
-  const compactName = product.nombre
-    .replace(/\bDE\b/gi, "")
-    .replace(/\bPRODUCTO\b/gi, "")
-    .replace(/\s+/g, " ")
-    .trim();
+  const compactName = cleanProductName(product.nombre);
   const shortBrand = product.brand?.nombre ? product.brand.nombre : "";
   const category = product.category?.nombre ? product.category.nombre : "";
   const firstTokens = product.nombre.split(/[\/\s-]+/).filter(Boolean).slice(0, 4).join(" ");
-  return [
+  const name = normalize(product.nombre);
+  const baseNegative = ["-mujer", "-persona", "-rostro", "-paisaje", "-turismo", "-hotel", "-futbol", "-estadio", "-pelicula", "-poster", "-mueble", "-disfraz"];
+  const negative = [...baseNegative, name.includes("cancha") ? "" : "-cancha"].filter(Boolean).join(" ");
+  const special: string[] = [];
+  const brandName = normalize(product.brand?.nombre);
+  if (brandName.includes("anita")) special.push(`Anita alimentos Peru ${compactName} producto`, `Anita fideos condimentos ${compactName}`, `Anita Peru producto ${category}`);
+  if (name.includes("cancha")) special.push(`${compactName} maiz cancha snack producto Peru`, `cancha chulpi maiz snack bolsa producto`);
+  if (name.includes("bandido")) special.push(`${compactName} snack producto Peru`, `Bandido snack bolsa producto`);
+  if (/(oval|puerto|inka)/i.test(product.nombre)) special.push(`${compactName} producto abarrotes Peru`, `${compactName} empaque producto`);
+  if (name.includes("hh ss")) special.push(`${compactName} higiene personal sachet producto`, `${compactName} shampoo sachet producto Peru`);
+  const queries = [
+    ...special,
+    `${shortBrand} ${category} producto`.trim(),
+    `${shortBrand} ${compactName} producto Peru`.trim(),
     product.nombre,
     `${product.nombre} Peru`,
     `${product.nombre}${brand}`,
@@ -376,6 +472,7 @@ export function queriesForProduct(product: ProductWithImageContext) {
     category ? `${category} ${shortBrand} producto`.trim() : "",
     product.codigoInterno,
   ].filter((query, index, arr) => query && arr.indexOf(query) === index);
+  return queries.map((query) => `${query} ${negative}`);
 }
 
 async function logImageAttempt(input: {
@@ -510,11 +607,13 @@ export async function imageStatus() {
       withImage += 1;
     }
   }
-  const [jobs, candidates, logs, assetsWithHash] = await Promise.all([
+  const [jobs, candidates, logs, assetsWithHash, suspiciousCount, rejectedCount] = await Promise.all([
     prisma.productImageJob.groupBy({ by: ["status"], _count: { _all: true } }).catch(() => []),
     prisma.productImageCandidate.groupBy({ by: ["status"], _count: { _all: true } }).catch(() => []),
     prisma.productImageLog.findFirst({ orderBy: { createdAt: "desc" } }),
     prisma.mediaAsset.findMany({ where: { checksum: { not: null } }, select: { checksum: true } }).catch(() => []),
+    prisma.productImageQualityIssue.count({ where: { status: "suspected" } }).catch(() => 0),
+    prisma.productImageCandidate.count({ where: { status: "rejected" } }).catch(() => 0),
   ]);
   const hashCounts = new Map<string, number>();
   for (const asset of assetsWithHash) if (asset.checksum) hashCounts.set(asset.checksum, (hashCounts.get(asset.checksum) ?? 0) + 1);
@@ -528,8 +627,58 @@ export async function imageStatus() {
     jobs: Object.fromEntries(jobs.map((item) => [item.status, item._count._all])),
     candidates: Object.fromEntries(candidates.map((item) => [item.status, item._count._all])),
     duplicates: duplicated,
+    suspicious: suspiciousCount,
+    rejected: rejectedCount,
     lastLog: logs,
   };
+}
+
+export async function qualityAuditImages() {
+  const products = await prisma.product.findMany({ where: { imagenPrincipal: { not: null } }, include: { brand: true, category: true, imageCandidates: { orderBy: { createdAt: "desc" }, take: 3 } } });
+  const issues: Array<{ codigoInterno: string; nombre: string; imagenPrincipal: string | null; reason: string; severity: string }> = [];
+  for (const product of products) {
+    if (!product.imagenPrincipal || !(await localImageExists(product.imagenPrincipal))) continue;
+    const candidate = product.imageCandidates.find((item) => item.localPath === product.imagenPrincipal) ?? product.imageCandidates[0];
+    const assessment = imageQualityAssessment(product, {
+      imageUrlOriginal: candidate?.imageUrlOriginal ?? product.imagenPrincipal,
+      sourceUrl: candidate?.sourceUrl ?? product.imagenPrincipal,
+      sourceName: candidate?.sourceName ?? "Imagen actual",
+      confidence: candidate?.confidence ?? 0,
+    });
+    const reason = !assessment.ok ? assessment.reason : assessment.relevance < 82 ? `Relevancia baja (${assessment.relevance})` : "";
+    if (reason) {
+      const severity = reason.includes("persona") || reason.includes("turistico") || reason.includes("deportivo") || reason.includes("muebles") ? "high" : "medium";
+      await prisma.productImageQualityIssue.upsert({
+        where: { id: `${product.id}:${product.imagenPrincipal}` },
+        create: { id: `${product.id}:${product.imagenPrincipal}`, productId: product.id, localPath: product.imagenPrincipal, reason, severity, status: "suspected" },
+        update: { reason, severity, status: "suspected" },
+      }).catch(async () => {
+        await prisma.productImageQualityIssue.create({ data: { productId: product.id, localPath: product.imagenPrincipal, reason, severity, status: "suspected" } });
+      });
+      issues.push({ codigoInterno: product.codigoInterno, nombre: product.nombre, imagenPrincipal: product.imagenPrincipal, reason, severity });
+    }
+  }
+  return { totalWithImage: products.length, suspicious: issues.length, issues };
+}
+
+export async function qualityFixImages() {
+  const audit = await qualityAuditImages();
+  const issues = await prisma.productImageQualityIssue.findMany({ where: { status: "suspected" }, include: { product: true } });
+  let fixed = 0;
+  for (const issue of issues) {
+    await prisma.product.update({ where: { id: issue.productId }, data: { imagenPrincipal: null, imagenes: "[]" } });
+    if (issue.localPath) {
+      await prisma.productImageCandidate.updateMany({ where: { productId: issue.productId, localPath: issue.localPath }, data: { status: "rejected", error: issue.reason } });
+    }
+    await prisma.productImageJob.upsert({
+      where: { productId: issue.productId },
+      create: { productId: issue.productId, status: "pending", priority: 30, nextRunAt: new Date(), lastError: issue.reason },
+      update: { status: "pending", priority: 30, nextRunAt: new Date(), lastError: issue.reason },
+    });
+    await prisma.productImageQualityIssue.update({ where: { id: issue.id }, data: { status: "rejected", reviewedAt: new Date() } });
+    fixed += 1;
+  }
+  return { ...audit, fixed };
 }
 
 export async function processImageQueue(options: ImageProcessOptions = {}) {
@@ -666,12 +815,13 @@ export async function rejectImageCandidate(id: string) {
 }
 
 export async function adminImageDashboard() {
-  const [pending, missingProducts, stats, status, logs] = await Promise.all([
+  const [pending, missingProducts, stats, status, logs, suspicious] = await Promise.all([
     prisma.productImageCandidate.findMany({ where: { status: "pending" }, include: { product: { include: { brand: true, category: true } } }, orderBy: [{ confidence: "desc" }, { createdAt: "desc" }], take: 100 }),
     productsNeedingImages(100),
     prisma.productImageCandidate.groupBy({ by: ["status"], _count: { _all: true } }),
     imageStatus(),
     prisma.productImageLog.findMany({ include: { product: { select: { codigoInterno: true, nombre: true } } }, orderBy: { createdAt: "desc" }, take: 50 }),
+    prisma.productImageQualityIssue.findMany({ where: { status: "suspected" }, include: { product: { include: { brand: true, category: true } } }, orderBy: [{ severity: "desc" }, { createdAt: "desc" }], take: 100 }),
   ]);
   return {
     pending,
@@ -679,6 +829,7 @@ export async function adminImageDashboard() {
     stats: Object.fromEntries(stats.map((item) => [item.status, item._count._all])),
     status,
     logs,
+    suspicious,
   };
 }
 

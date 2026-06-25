@@ -9,8 +9,10 @@ async function main() {
   const status = await imageStatus();
   console.log(JSON.stringify({
     totalProductos: status.total,
-    conImagen: status.withImage,
+    conImagenConfiable: status.withImage,
     sinImagen: status.missing,
+    sospechosas: status.suspicious,
+    rechazadas: status.rejected,
     pendientes: status.jobs.pending ?? 0,
     procesando: status.jobs.processing ?? 0,
     completados: status.jobs.completed ?? 0,

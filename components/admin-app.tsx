@@ -994,11 +994,36 @@ function ProductImages({ data, reload }: { data: AnyRow; reload: () => void }) {
       setBusy(null);
     }
   }
+  async function auditQuality(action: "quality-audit" | "quality-fix") {
+    setBusy(action);
+    try {
+      const result = await api<AnyRow>(`/api/admin/imagenes/${action}`, { method: "POST", body: JSON.stringify({}) });
+      toast.success(action === "quality-audit" ? `Sospechosas: ${result.suspicious ?? 0}` : `Corregidas: ${result.fixed ?? 0}`);
+      reload();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "No se pudo auditar calidad");
+    } finally {
+      setBusy(null);
+    }
+  }
+  async function suspiciousAction(id: string, action: string) {
+    setBusy(id);
+    try {
+      await api(`/api/admin/imagenes/sospechosas/${id}`, { method: "POST", body: JSON.stringify({ action }) });
+      toast.success("Sospecha actualizada");
+      reload();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "No se pudo actualizar");
+    } finally {
+      setBusy(null);
+    }
+  }
   const pending = data.pending ?? [];
   const missing = data.missingProducts ?? [];
   const status = data.status ?? {};
   const progress = lastProgress ?? { done: status.withImage ?? 0, total: status.total ?? 0, percent: status.percent ?? 0, etaMinutes: null, speedPerMinute: null };
   const logs = data.logs ?? [];
+  const suspicious = data.suspicious ?? [];
   return (
     <div className="grid gap-4">
       <Panel title="Estado Imagenes" help="Cola automatica con reintentos. Las imagenes aprobadas o manuales no se reemplazan; las nuevas se descargan, validan, convierten a WebP y se guardan localmente.">
@@ -1024,6 +1049,32 @@ function ProductImages({ data, reload }: { data: AnyRow; reload: () => void }) {
           <button disabled={Boolean(busy)} onClick={() => runFetch("all")} className="rounded border border-neutral-300 px-4 py-2 text-sm font-black disabled:opacity-60">Procesar todas</button>
           <button disabled={Boolean(busy)} onClick={() => runFetch(100, "reintentar-pendientes")} className="rounded border border-neutral-300 px-4 py-2 text-sm font-black disabled:opacity-60">Reintentar pendientes</button>
           <button disabled={Boolean(busy)} onClick={() => runFetch(100, "reparar-rotas")} className="rounded border border-neutral-300 px-4 py-2 text-sm font-black disabled:opacity-60">Reparar imagenes rotas</button>
+          <button disabled={Boolean(busy)} onClick={() => auditQuality("quality-audit")} className="rounded border border-neutral-300 px-4 py-2 text-sm font-black disabled:opacity-60">Auditar calidad</button>
+          <button disabled={Boolean(busy)} onClick={() => auditQuality("quality-fix")} className="rounded border border-red-200 px-4 py-2 text-sm font-black text-red-700 disabled:opacity-60">Limpiar sospechosas</button>
+        </div>
+      </Panel>
+      <Panel title="Imagenes sospechosas" help="Preferimos dejar sin imagen antes que mostrar una falsa. Revisa, aprueba manualmente o rechaza y reencola.">
+        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+          {suspicious.map((issue: AnyRow) => (
+            <div key={issue.id} className="rounded border border-red-100 bg-white p-3 shadow-sm">
+              <div className="flex gap-3">
+                <img src={adminImageSrc(issue.localPath)} alt={issue.product?.nombre ?? "Sospechosa"} className="h-24 w-24 rounded border border-neutral-200 object-contain" />
+                <div className="min-w-0">
+                  <p className="text-xs font-black uppercase text-[#D32F2F]">{issue.product?.codigoInterno}</p>
+                  <p className="line-clamp-2 text-sm font-black">{issue.product?.nombre}</p>
+                  <p className="mt-1 text-xs font-semibold text-neutral-500">{issue.product?.brand?.nombre ?? issue.product?.category?.nombre ?? "-"}</p>
+                  <p className="mt-1 text-xs font-bold text-red-700">{issue.reason}</p>
+                </div>
+              </div>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <button onClick={() => suspiciousAction(issue.id, "aprobar")} className="rounded border border-neutral-300 px-3 py-1.5 text-xs font-black">Aprobar manualmente</button>
+                <button onClick={() => suspiciousAction(issue.id, "rechazar")} className="rounded bg-[#D32F2F] px-3 py-1.5 text-xs font-black text-white">Rechazar</button>
+                <button onClick={() => suspiciousAction(issue.id, "reintentar")} className="rounded border border-neutral-300 px-3 py-1.5 text-xs font-black">Reintentar</button>
+                <button onClick={() => suspiciousAction(issue.id, "sin-imagen")} className="rounded border border-neutral-300 px-3 py-1.5 text-xs font-black">Dejar sin imagen</button>
+              </div>
+            </div>
+          ))}
+          {!suspicious.length ? <p className="text-sm font-semibold text-neutral-500">No hay imagenes sospechosas marcadas.</p> : null}
         </div>
       </Panel>
       <Panel title="Importar imagenes por CSV" help="Formato: codigoInterno,imageUrl,sourceUrl,sourceName. El sistema descarga cada imagen y guarda la ruta local en el producto.">

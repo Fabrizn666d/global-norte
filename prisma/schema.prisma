@@ -85,45 +85,46 @@ model Brand {
 }
 
 model Product {
-  id                String                  @id @default(cuid())
-  codigoInterno     String                  @unique
+  id                String                     @id @default(cuid())
+  codigoInterno     String                     @unique
   nombre            String
-  slug              String                  @unique
+  slug              String                     @unique
   descripcion       String?
   categoryId        String
-  category          Category                @relation(fields: [categoryId], references: [id])
+  category          Category                   @relation(fields: [categoryId], references: [id])
   brandId           String?
-  brand             Brand?                  @relation(fields: [brandId], references: [id])
+  brand             Brand?                     @relation(fields: [brandId], references: [id])
   precioUnitario    Float
   precioCaja        Float?
   unidadesPorCaja   Int?
   etiquetaCaja      String?
   precioAnterior    Float?
-  stock             Int                     @default(0)
-  stockMinimo       Int                     @default(1)
-  unidad            String                  @default("unidad")
-  imagenes          String                  @default("[]")
+  stock             Int                        @default(0)
+  stockMinimo       Int                        @default(1)
+  unidad            String                     @default("unidad")
+  imagenes          String                     @default("[]")
   imagenPrincipal   String?
-  activo            Boolean                 @default(true)
-  destacado         Boolean                 @default(false)
-  mostrarEnHome     Boolean                 @default(false)
-  ordenDestacado    Int                     @default(0)
+  activo            Boolean                    @default(true)
+  destacado         Boolean                    @default(false)
+  mostrarEnHome     Boolean                    @default(false)
+  ordenDestacado    Int                        @default(0)
   etiquetaDestacada String?
-  enOferta          Boolean                 @default(false)
-  nuevo             Boolean                 @default(false)
-  agotado           Boolean                 @default(false)
-  tags              String                  @default("[]")
+  enOferta          Boolean                    @default(false)
+  nuevo             Boolean                    @default(false)
+  agotado           Boolean                    @default(false)
+  tags              String                     @default("[]")
   seoTitulo         String?
   seoDesc           String?
-  vistas            Int                     @default(0)
-  vendidos          Int                     @default(0)
-  createdAt         DateTime                @default(now())
-  updatedAt         DateTime                @updatedAt
+  vistas            Int                        @default(0)
+  vendidos          Int                        @default(0)
+  createdAt         DateTime                   @default(now())
+  updatedAt         DateTime                   @updatedAt
   orderItems        OrderItem[]
   cartItems         CartItem[]
   imageCandidates   ProductImageCandidate[]
   imageJobs         ProductImageJob[]
   imageLogs         ProductImageLog[]
+  imageIssues       ProductImageQualityIssue[]
 
   @@index([categoryId])
   @@index([brandId])
@@ -190,6 +191,24 @@ model ProductImageLog {
   @@index([productId])
   @@index([result])
   @@index([createdAt])
+}
+
+model ProductImageQualityIssue {
+  id         String    @id @default(cuid())
+  productId  String
+  product    Product   @relation(fields: [productId], references: [id], onDelete: Cascade)
+  localPath  String?
+  reason     String
+  severity   String    @default("medium")
+  status     String    @default("suspected")
+  reviewedBy String?
+  reviewedAt DateTime?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  @@index([productId])
+  @@index([status])
+  @@index([severity])
 }
 
 model Cart {

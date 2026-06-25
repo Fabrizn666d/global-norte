@@ -122,6 +122,8 @@ model Product {
   orderItems        OrderItem[]
   cartItems         CartItem[]
   imageCandidates   ProductImageCandidate[]
+  imageJobs         ProductImageJob[]
+  imageLogs         ProductImageLog[]
 
   @@index([categoryId])
   @@index([brandId])
@@ -138,11 +140,55 @@ model ProductImageCandidate {
   sourceName       String
   confidence       Int      @default(0)
   status           String   @default("pending")
+  contentHash      String?
+  width            Int?
+  height           Int?
+  fileSize         Int?
+  error            String?
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
 
   @@index([productId])
   @@index([status])
+  @@index([contentHash])
+  @@index([createdAt])
+}
+
+model ProductImageJob {
+  id          String    @id @default(cuid())
+  productId   String    @unique
+  product     Product   @relation(fields: [productId], references: [id], onDelete: Cascade)
+  status      String    @default("pending")
+  priority    Int       @default(0)
+  attempts    Int       @default(0)
+  lastError   String?
+  lastRunAt   DateTime?
+  nextRunAt   DateTime?
+  completedAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([status, nextRunAt])
+  @@index([priority])
+}
+
+model ProductImageLog {
+  id               String   @id @default(cuid())
+  productId        String
+  product          Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  query            String?
+  sourceName       String
+  imageUrlOriginal String?
+  sourceUrl        String?
+  result           String
+  error            String?
+  confidence       Int      @default(0)
+  localPath        String?
+  contentHash      String?
+  createdAt        DateTime @default(now())
+
+  @@index([productId])
+  @@index([result])
   @@index([createdAt])
 }
 
@@ -427,9 +473,11 @@ model MediaAsset {
   entityType   String?
   entityId     String?
   createdBy    String?
+  checksum     String?
   createdAt    DateTime @default(now())
 
   @@index([entityType, entityId])
+  @@index([checksum])
   @@index([createdAt])
 }
 

@@ -17,12 +17,15 @@ import { nextOrderNumber } from "@/lib/orders";
 import { evaluateCommerce } from "@/lib/commerce";
 import { ConsolidatedRow, createConsolidatedPdf } from "@/lib/consolidated-pdf";
 import { sendOrderEmails, sendOrderWhatsApp } from "@/lib/notifications";
-import { backupDownload, BackupType, generateBackup } from "@/lib/backups";
+import { backupDownload, BackupType, generateBackup, inspectBackupZip, restoreBackupZip } from "@/lib/backups";
+import { exportCatalogZip, importCatalogZip } from "@/lib/catalog-sync";
+import { systemStatus } from "@/lib/system-status";
 import {
   adminImageDashboard,
   approveImageCandidate,
-  fetchImagesForProducts,
+  imageStatus,
   importProductImageCsv,
+  processImageQueue,
   registerManualProductImage,
   rejectImageCandidate,
   retryProductImageSearch,
@@ -184,7 +187,7 @@ function splitContact(contact?: string | null) {
 }
 
 function normalizeCustomerEmail(email: string | undefined, telefono: string) {
-  return email?.trim() || `${telefono.replace(/\D/g, "")}@clientes.globalnorte.local`;
+  return email?.trim().toLowerCase() || `${telefono.replace(/\D/g, "")}@clientes.globalnorte.local`;
 }
 
 function customerAuthSegments(segments: string[]) {
@@ -591,11 +594,11 @@ async function publicPost(request: NextRequest, segments: string[]) {
     const limited = await checkRateLimit(ip, "login", 5, 15 * 60 * 1000);
     if (!limited.ok) return fail("Login bloqueado temporalmente", 429);
     const data = loginSchema.parse(await readJson(request));
-    const credential = data.email.trim();
+    const credential = data.email.trim().toLowerCase();
     const user = await prisma.user.findFirst({
       where: { OR: [{ email: credential }, { telefono: credential.replace(/\s+/g, "") }] },
     });
-    if (!user || user.bloqueado || !(await bcrypt.compare(data.password, user.password))) {
+    if (!user || !user.activo || user.bloqueado || !(await bcrypt.compare(data.password, user.password))) {
       return fail("Credenciales invalidas", 401);
     }
     await prisma.user.update({ where: { id: user.id }, data: { ultimoAcceso: new Date() } });
@@ -971,6 +974,17 @@ async function accountDelete(request: NextRequest, segments: string[]) {
 }
 
 async function adminGet(request: NextRequest, segments: string[]) {
+  const [rawFirst, rawSecond] = segments;
+  if (rawFirst === "catalogo" && rawSecond === "export") {
+    const file = await exportCatalogZip();
+    return new NextResponse(new Uint8Array(file), {
+      headers: {
+        "Content-Type": "application/zip",
+        "Content-Disposition": `attachment; filename="global-norte-catalogo-${new Date().toISOString().slice(0, 10)}.zip"`,
+        "Cache-Control": "no-store",
+      },
+    });
+  }
   segments = normalizeSegments(segments);
   const [first, second, third] = segments;
 
@@ -992,6 +1006,7 @@ async function adminGet(request: NextRequest, segments: string[]) {
   if (!session) return fail("No autorizado", 401);
 
   if (!first || first === "dashboard" || (first === "reportes" && second === "dashboard")) return ok(await dashboardReport());
+  if (first === "sistema" || first === "system") return ok(await systemStatus());
   if (first === "pedidos") {
     if (second === "export") return exportOrders(request);
     if (second && third === "pdf") return adminOrderPdf(second);
@@ -1009,6 +1024,7 @@ async function adminGet(request: NextRequest, segments: string[]) {
   if (first === "categorias") return ok({ categories: await prisma.category.findMany({ include: { _count: { select: { products: true } } }, orderBy: { orden: "asc" } }) });
   if (first === "marcas") return ok({ brands: await prisma.brand.findMany({ include: { _count: { select: { products: true } } }, orderBy: { orden: "asc" } }) });
   if (first === "banners") return ok({ banners: await prisma.banner.findMany({ orderBy: { orden: "asc" } }) });
+  if (first === "imagenes-estado" || (first === "imagenes" && second === "estado")) return ok(await imageStatus());
   if (first === "imagenes") return ok(await adminImageDashboard());
   if (first === "cupones") return ok({ coupons: await prisma.coupon.findMany({ orderBy: [{ prioridad: "desc" }, { createdAt: "desc" }] }) });
   if (first === "bonificaciones") return ok({ bonuses: await prisma.bonus.findMany({ include: { cliente: { select: { id: true, nombre: true, apellido: true, nombreNegocio: true } } }, orderBy: { createdAt: "desc" } }) });
@@ -1039,6 +1055,7 @@ async function adminGet(request: NextRequest, segments: string[]) {
 }
 
 async function adminPost(request: NextRequest, segments: string[]) {
+  const [rawFirst, rawSecond] = segments;
   segments = normalizeSegments(segments);
   const [first, second, third] = segments;
   const ip = getIp(request);
@@ -1047,7 +1064,7 @@ async function adminPost(request: NextRequest, segments: string[]) {
     const limited = await checkRateLimit(getIp(request), "admin_login", 5, 15 * 60 * 1000);
     if (!limited.ok) return fail("Login bloqueado temporalmente", 429);
     const data = loginSchema.parse(await readJson(request));
-    const admin = await prisma.adminUser.findUnique({ where: { email: data.email } });
+    const admin = await prisma.adminUser.findUnique({ where: { email: data.email.trim().toLowerCase() } });
     if (!admin || !admin.activo || !(await bcrypt.compare(data.password, admin.password))) {
       return fail("Credenciales invalidas", 401);
     }
@@ -1179,17 +1196,57 @@ async function adminPost(request: NextRequest, segments: string[]) {
   }
 
   if (first === "backups") {
+    if (second === "restore" || second === "restaurar") {
+      const form = await request.formData();
+      const file = form.get("file");
+      const apply = form.get("apply") === "true";
+      if (!(file instanceof File)) return fail("Backup ZIP no enviado", 400);
+      const buffer = Buffer.from(await file.arrayBuffer());
+      const plan = await inspectBackupZip(buffer);
+      if (!plan.ok) return fail("Backup invalido", 400, { plan });
+      if (!apply) return ok({ plan, requiresConfirmation: true });
+      return ok(await restoreBackupZip(buffer, session.id));
+    }
     const body = await readJson(request);
     const type = asString(body.tipo, "complete") as BackupType;
     if (!["database", "uploads", "pdfs", "complete"].includes(type)) return fail("Tipo de backup invalido", 400);
     return ok({ backup: await generateBackup(type, session.id) }, { status: 201 });
   }
 
+  if (rawFirst === "catalogo" && (rawSecond === "import" || rawSecond === "importar" || rawSecond === "sincronizar")) {
+    const form = await request.formData();
+    const file = form.get("file");
+    if (!(file instanceof File)) return fail("ZIP de catalogo no enviado", 400);
+    const result = await importCatalogZip(Buffer.from(await file.arrayBuffer()));
+    await prisma.activityLog.create({ data: { userId: session.id, accion: "importar", modulo: "catalogo", detalle: `Productos ${result.products}, banners ${result.banners}` } });
+    return ok(result);
+  }
+
   if (first === "imagenes") {
     if (second === "fetch") {
       const body = await readJson(request);
       const limit = Math.max(1, Math.min(100, Number(body.limit ?? 30)));
-      return ok(await fetchImagesForProducts(limit), { status: 201 });
+      return ok(await processImageQueue({ limit }), { status: 201 });
+    }
+    if (second === "procesar") {
+      const body = await readJson(request);
+      const limitValue = body.limit === "all" || body.all ? 10000 : Number(body.limit ?? 50);
+      return ok(await processImageQueue({ limit: limitValue, all: body.limit === "all" || Boolean(body.all), retryErrors: Boolean(body.retryErrors) }), { status: 201 });
+    }
+    if (second === "reintentar-pendientes") {
+      return ok(await processImageQueue({ limit: 100, retryErrors: true }), { status: 201 });
+    }
+    if (second === "reparar-rotas") {
+      const broken = await prisma.product.findMany({ where: { imagenPrincipal: { startsWith: "/uploads/" } }, select: { id: true, imagenPrincipal: true } });
+      for (const product of broken) {
+        const filePath = product.imagenPrincipal ? path.join(process.cwd(), "public", product.imagenPrincipal.replace(/^\//, "")) : "";
+        const exists = filePath ? await fs.stat(filePath).then((stat) => stat.isFile()).catch(() => false) : false;
+        if (!exists) {
+          await prisma.product.update({ where: { id: product.id }, data: { imagenPrincipal: null, imagenes: "[]" } });
+          await prisma.productImageJob.upsert({ where: { productId: product.id }, create: { productId: product.id, status: "pending", priority: 20 }, update: { status: "pending", priority: 20, nextRunAt: new Date() } });
+        }
+      }
+      return ok(await processImageQueue({ limit: 100, retryErrors: true }), { status: 201 });
     }
     if (second === "importar-csv") {
       const contentType = request.headers.get("content-type") ?? "";

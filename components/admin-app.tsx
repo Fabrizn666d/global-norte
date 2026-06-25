@@ -64,6 +64,7 @@ const nav = [
   { href: "/admin/bonificaciones", label: "Bonificaciones", icon: Gift },
   { href: "/admin/notificaciones", label: "Notificaciones", icon: BellRing },
   { href: "/admin/backups", label: "Backups", icon: Download },
+  { href: "/admin/sistema", label: "Sistema", icon: Settings },
   { href: "/admin/clientes", label: "Clientes", icon: UsersRound },
   { href: "/admin/reportes", label: "Reportes", icon: BarChart3 },
   { href: "/admin/configuracion", label: "Configuracion", icon: Settings },
@@ -176,6 +177,7 @@ export function AdminApp({ route }: { route: string[] }) {
       }
       if (active === "consolidado") setData(await api("/api/admin/consolidado?periodo=hoy"));
       if (active === "backups") setData(await api("/api/admin/backups"));
+      if (active === "sistema") setData(await api("/api/admin/sistema"));
       if (active === "clientes") setData(await api(detailId ? `/api/admin/clientes/${detailId}` : "/api/admin/clientes"));
       if (active === "reportes") {
         const [ventas, productos, categorias, inventario] = await Promise.all([
@@ -258,6 +260,7 @@ export function AdminApp({ route }: { route: string[] }) {
           {active === "notificaciones" ? <Notifications rows={data.notifications ?? []} customers={data.customers ?? []} reload={loadData} /> : null}
           {active === "consolidado" ? <Consolidated initial={data} /> : null}
           {active === "backups" ? <Backups data={data} reload={loadData} /> : null}
+          {active === "sistema" ? <SystemStatus data={data} /> : null}
           {active === "clientes" ? <Customers data={data} detailId={detailId} reload={loadData} /> : null}
           {active === "reportes" ? <Reports data={data} /> : null}
           {active === "configuracion" ? <SettingsView rows={data.settings ?? []} reload={loadData} /> : null}
@@ -914,10 +917,13 @@ function adminImageSrc(src?: string | null) {
 function ProductImages({ data, reload }: { data: AnyRow; reload: () => void }) {
   const [busy, setBusy] = useState<string | null>(null);
   const [csv, setCsv] = useState("");
-  async function runFetch(limit = 30) {
-    setBusy("fetch");
+  const [lastProgress, setLastProgress] = useState<AnyRow | null>(null);
+  async function runFetch(limit: number | "all" = 50, action = "procesar") {
+    const key = `${action}-${limit}`;
+    setBusy(key);
     try {
-      const result = await api<AnyRow>("/api/admin/imagenes/fetch", { method: "POST", body: JSON.stringify({ limit }) });
+      const result = await api<AnyRow>(`/api/admin/imagenes/${action}`, { method: "POST", body: JSON.stringify({ limit, all: limit === "all", retryErrors: action.includes("reintentar") }) });
+      setLastProgress(result.progress ?? null);
       toast.success(`Imagenes procesadas: ${result.populated ?? 0}/${result.scanned ?? 0}`);
       reload();
     } catch (error) {
@@ -990,18 +996,34 @@ function ProductImages({ data, reload }: { data: AnyRow; reload: () => void }) {
   }
   const pending = data.pending ?? [];
   const missing = data.missingProducts ?? [];
+  const status = data.status ?? {};
+  const progress = lastProgress ?? { done: status.withImage ?? 0, total: status.total ?? 0, percent: status.percent ?? 0, etaMinutes: null, speedPerMinute: null };
+  const logs = data.logs ?? [];
   return (
     <div className="grid gap-4">
-      <Panel title="Gestion de imagenes" help="Las imagenes se descargan al servidor, se convierten a WebP, se guardan en DB como candidatos y solo se muestran desde ruta local.">
+      <Panel title="Estado Imagenes" help="Cola automatica con reintentos. Las imagenes aprobadas o manuales no se reemplazan; las nuevas se descargan, validan, convierten a WebP y se guardan localmente.">
         <div className="grid gap-3 md:grid-cols-4">
-          <Kpi label="Pendientes" value={pending.length} />
-          <Kpi label="Sin imagen real" value={missing.length} />
-          <Kpi label="Aprobadas" value={data.stats?.approved ?? 0} />
-          <Kpi label="Autoaprobadas" value={data.stats?.auto_approved ?? 0} />
+          <Kpi label="Total productos" value={status.total ?? 0} />
+          <Kpi label="Con imagen" value={status.withImage ?? 0} />
+          <Kpi label="Sin imagen" value={status.missing ?? missing.length} />
+          <Kpi label="Pendientes cola" value={status.jobs?.pending ?? 0} />
+        </div>
+        <div className="mt-4 rounded border border-neutral-200 bg-neutral-50 p-4">
+          <div className="mb-2 flex items-center justify-between text-sm font-black">
+            <span>{progress.done ?? 0} / {progress.total ?? 0}</span>
+            <span>{progress.percent ?? 0}%</span>
+          </div>
+          <div className="h-3 overflow-hidden rounded-full bg-white">
+            <div className="h-full rounded-full bg-[#D32F2F] transition-all" style={{ width: `${Math.min(100, Math.max(0, Number(progress.percent ?? 0)))}%` }} />
+          </div>
+          <p className="mt-2 text-xs font-semibold text-neutral-500">Velocidad: {progress.speedPerMinute ?? "-"} productos/min · ETA: {progress.etaMinutes ?? "-"} min · Rotas: {status.broken ?? 0} · Duplicadas: {status.duplicates ?? 0}</p>
         </div>
         <div className="mt-4 flex flex-wrap gap-2">
-          <button disabled={Boolean(busy)} onClick={() => runFetch(30)} className="rounded bg-[#D32F2F] px-4 py-2 text-sm font-black text-white disabled:opacity-60">{busy === "fetch" ? "Buscando..." : "Buscar primeras 30"}</button>
-          <button disabled={Boolean(busy)} onClick={() => runFetch(100)} className="rounded border border-neutral-300 px-4 py-2 text-sm font-black disabled:opacity-60">Buscar 100</button>
+          <button disabled={Boolean(busy)} onClick={() => runFetch(50)} className="rounded bg-[#D32F2F] px-4 py-2 text-sm font-black text-white disabled:opacity-60">{busy === "procesar-50" ? "Procesando..." : "Procesar 50"}</button>
+          <button disabled={Boolean(busy)} onClick={() => runFetch(100)} className="rounded border border-neutral-300 px-4 py-2 text-sm font-black disabled:opacity-60">Procesar 100</button>
+          <button disabled={Boolean(busy)} onClick={() => runFetch("all")} className="rounded border border-neutral-300 px-4 py-2 text-sm font-black disabled:opacity-60">Procesar todas</button>
+          <button disabled={Boolean(busy)} onClick={() => runFetch(100, "reintentar-pendientes")} className="rounded border border-neutral-300 px-4 py-2 text-sm font-black disabled:opacity-60">Reintentar pendientes</button>
+          <button disabled={Boolean(busy)} onClick={() => runFetch(100, "reparar-rotas")} className="rounded border border-neutral-300 px-4 py-2 text-sm font-black disabled:opacity-60">Reparar imagenes rotas</button>
         </div>
       </Panel>
       <Panel title="Importar imagenes por CSV" help="Formato: codigoInterno,imageUrl,sourceUrl,sourceName. El sistema descarga cada imagen y guarda la ruta local en el producto.">
@@ -1060,6 +1082,20 @@ function ProductImages({ data, reload }: { data: AnyRow; reload: () => void }) {
           ))}
           {!missing.length ? <p className="text-sm font-semibold text-neutral-500">Todos los productos revisados tienen imagen local real.</p> : null}
         </div>
+      </Panel>
+      <Panel title="Logs recientes">
+        <DataTable
+          rows={logs.map((log: AnyRow) => ({
+            fecha: log.createdAt ? new Date(log.createdAt).toLocaleString("es-PE") : "-",
+            producto: log.product ? `${log.product.codigoInterno} - ${log.product.nombre}` : log.productId,
+            fuente: log.sourceName,
+            resultado: log.result,
+            confianza: log.confidence,
+            error: log.error ?? "",
+            ruta: log.localPath ?? "",
+          }))}
+          columns={["fecha", "producto", "fuente", "resultado", "confianza", "error", "ruta"]}
+        />
       </Panel>
     </div>
   );
@@ -1186,6 +1222,9 @@ function Consolidated({ initial }: { initial: AnyRow }) {
 
 function Backups({ data, reload }: { data: AnyRow; reload: () => void }) {
   const [busy, setBusy] = useState<string | null>(null);
+  const [restorePlan, setRestorePlan] = useState<AnyRow | null>(null);
+  const [restoreFile, setRestoreFile] = useState<File | null>(null);
+  const [catalogFile, setCatalogFile] = useState<File | null>(null);
   async function generate(tipo: string) {
     setBusy(tipo);
     try {
@@ -1198,9 +1237,67 @@ function Backups({ data, reload }: { data: AnyRow; reload: () => void }) {
       setBusy(null);
     }
   }
+  async function validateRestore(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!restoreFile) return toast.error("Selecciona un backup ZIP");
+    const form = new FormData();
+    form.set("file", restoreFile);
+    setBusy("restore-check");
+    try {
+      const response = await fetch("/api/admin/backups/restore", { method: "POST", body: form });
+      const result = (await response.json().catch(() => ({}))) as AnyRow;
+      if (!response.ok) throw new Error(result.error ?? "Backup invalido");
+      setRestorePlan(result.plan);
+      toast.success("Backup validado. Confirma para restaurar.");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "No se pudo validar");
+    } finally {
+      setBusy(null);
+    }
+  }
+  async function applyRestore() {
+    if (!restoreFile || !window.confirm("Restaurar reemplazara la DB/uploads/PDFs actuales. Se generara backup previo. Continuar?")) return;
+    const form = new FormData();
+    form.set("file", restoreFile);
+    form.set("apply", "true");
+    setBusy("restore-apply");
+    try {
+      const response = await fetch("/api/admin/backups/restore", { method: "POST", body: form });
+      const result = (await response.json().catch(() => ({}))) as AnyRow;
+      if (!response.ok) throw new Error(result.error ?? "No se pudo restaurar");
+      toast.success("Backup restaurado. Reinicia PM2 para recargar conexiones.");
+      setRestorePlan(null);
+      setRestoreFile(null);
+      reload();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "No se pudo restaurar");
+    } finally {
+      setBusy(null);
+    }
+  }
+  async function importCatalog() {
+    if (!catalogFile) return toast.error("Selecciona un ZIP de catalogo");
+    const form = new FormData();
+    form.set("file", catalogFile);
+    setBusy("catalog-import");
+    try {
+      const response = await fetch("/api/admin/catalogo/sincronizar", { method: "POST", body: form });
+      const result = (await response.json().catch(() => ({}))) as AnyRow;
+      if (!response.ok) throw new Error(result.error ?? "No se pudo importar catalogo");
+      toast.success(`Catalogo sincronizado: ${result.products ?? 0} productos`);
+      setCatalogFile(null);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "No se pudo importar catalogo");
+    } finally {
+      setBusy(null);
+    }
+  }
   const backups = data.backups ?? [];
   return <div className="grid gap-4">
     <Panel title="Backups" help="Descarga copias respaldables de SQLite, uploads, PDFs o un ZIP completo. Guarda estos archivos fuera del servidor.">
+      <button disabled={Boolean(busy)} onClick={() => generate("complete")} className="mb-4 w-full rounded-2xl bg-[#D32F2F] px-5 py-5 text-lg font-black uppercase text-white shadow-lg transition hover:bg-[#B71C1C] disabled:opacity-60">
+        {busy === "complete" ? "Generando backup completo..." : "Generar backup completo"}
+      </button>
       <div className="grid gap-3 md:grid-cols-4">
         {[{ tipo: "database", label: "Backup DB" }, { tipo: "uploads", label: "Backup uploads" }, { tipo: "pdfs", label: "Backup PDFs" }, { tipo: "complete", label: "Descargar todo" }].map((item) => (
           <button key={item.tipo} disabled={Boolean(busy)} onClick={() => generate(item.tipo)} className="rounded bg-[#D32F2F] px-4 py-3 text-sm font-black text-white disabled:opacity-60">{busy === item.tipo ? "Generando" : item.label}</button>
@@ -1211,10 +1308,84 @@ function Backups({ data, reload }: { data: AnyRow; reload: () => void }) {
         <p className="mt-2">Restaurar: detener PM2, reemplazar `data/globalnorte.db`, copiar `uploads/` y `pdfs/`, ejecutar `npx prisma generate`, `npx prisma db push` y reiniciar.</p>
       </div>
     </Panel>
+    <div className="grid gap-4 xl:grid-cols-2">
+      <Panel title="Restaurar backup" help="Primero valida el ZIP. Al confirmar se crea un backup previo y se restauran DB, uploads y PDFs. Reinicia PM2 despues.">
+        <form onSubmit={validateRestore} className="grid gap-3">
+          <input type="file" accept=".zip,application/zip" onChange={(event) => setRestoreFile(event.target.files?.[0] ?? null)} className="rounded border border-neutral-300 px-3 py-2 text-sm" />
+          <div className="flex flex-wrap gap-2">
+            <button disabled={busy === "restore-check"} className="rounded border border-neutral-300 px-4 py-2 text-sm font-black">{busy === "restore-check" ? "Validando..." : "Validar backup"}</button>
+            {restorePlan?.ok ? <button type="button" disabled={busy === "restore-apply"} onClick={applyRestore} className="rounded bg-neutral-900 px-4 py-2 text-sm font-black text-white">{busy === "restore-apply" ? "Restaurando..." : "Confirmar restauracion"}</button> : null}
+          </div>
+        </form>
+        {restorePlan ? <pre className="mt-3 max-h-56 overflow-auto rounded bg-neutral-950 p-3 text-xs text-white">{JSON.stringify(restorePlan.summary ?? restorePlan, null, 2)}</pre> : null}
+      </Panel>
+      <Panel title="Sincronizar catalogo" help="Exporta o importa productos, categorias, marcas, banners, configuracion e imagenes sin tocar clientes, usuarios, pedidos ni historial.">
+        <div className="grid gap-3">
+          <a href="/api/admin/catalogo/export" className="rounded bg-[#D32F2F] px-4 py-3 text-center text-sm font-black uppercase text-white">Exportar catalogo</a>
+          <input type="file" accept=".zip,application/zip" onChange={(event) => setCatalogFile(event.target.files?.[0] ?? null)} className="rounded border border-neutral-300 px-3 py-2 text-sm" />
+          <button onClick={importCatalog} disabled={busy === "catalog-import"} className="rounded border border-neutral-300 px-4 py-3 text-sm font-black">{busy === "catalog-import" ? "Sincronizando..." : "Sincronizar catalogo"}</button>
+        </div>
+      </Panel>
+    </div>
     <Panel title="Historial de backups">
       <DataTable rows={backups.map((backup: AnyRow) => ({ ...backup, size: `${Math.round((backup.size || 0) / 1024)} KB`, fecha: backup.completedAt ? new Date(backup.completedAt).toLocaleString("es-PE") : "-" }))} columns={["tipo", "estado", "fileName", "size", "fecha", "checksum"]} renderActions={(row) => row.estado === "completado" ? <a href={`/api/admin/backups/${row.id}/download`} className="rounded border border-neutral-300 px-2 py-1 text-xs font-bold">Descargar</a> : null} />
     </Panel>
   </div>;
+}
+
+function formatBytes(value: number) {
+  const bytes = Number(value || 0);
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function SystemStatus({ data }: { data: AnyRow }) {
+  const counts = data.counts ?? {};
+  const images = data.images ?? {};
+  const db = data.database ?? {};
+  const storage = data.storage ?? {};
+  return (
+    <div className="grid gap-4">
+      <div className="grid gap-4 md:grid-cols-4">
+        <Kpi label="Productos" value={counts.products ?? 0} />
+        <Kpi label="Clientes" value={counts.clients ?? 0} />
+        <Kpi label="Pedidos" value={counts.orders ?? 0} />
+        <Kpi label="Imagenes rotas" value={images.brokenCount ?? 0} />
+      </div>
+      <Panel title="Base de datos y runtime">
+        <div className="grid gap-3 md:grid-cols-2">
+          <Info label="DB usada" value={db.url} />
+          <Info label="Ruta DB" value={db.path} />
+          <Info label="Peso DB" value={formatBytes(db.size)} />
+          <Info label="Existe DB" value={db.exists ? "Si" : "No"} />
+          <Info label="Version" value={data.app?.version} />
+          <Info label="Commit" value={data.app?.commit} />
+          <Info label="Uptime" value={`${data.app?.uptimeSeconds ?? 0}s`} />
+          <Info label="PM2" value={data.runtime?.pm2?.detected ? `Activo (${data.runtime.pm2.id})` : "No detectado en este proceso"} />
+        </div>
+      </Panel>
+      <Panel title="Almacenamiento persistente">
+        <div className="grid gap-3 md:grid-cols-3">
+          <Info label="Uploads" value={`${storage.uploads?.path ?? "-"} - ${formatBytes(storage.uploads?.size)}`} />
+          <Info label="PDFs" value={`${storage.pdfs?.path ?? "-"} - ${formatBytes(storage.pdfs?.size)}`} />
+          <Info label="Backups" value={`${storage.backups?.path ?? "-"} - ultimo: ${storage.backups?.lastBackup?.completedAt ? new Date(storage.backups.lastBackup.completedAt).toLocaleString("es-PE") : "sin backup"}`} />
+        </div>
+      </Panel>
+      <Panel title="Auditoria de imagenes">
+        <div className="grid gap-3 md:grid-cols-4">
+          <Kpi label="Productos sin imagen" value={images.missing ?? 0} />
+          <Kpi label="Productos con picsum" value={images.picsum ?? 0} />
+          <Kpi label="Imagenes en DB" value={counts.mediaAssets ?? 0} />
+          <Kpi label="Rotas" value={images.brokenCount ?? 0} />
+        </div>
+        <DataTable rows={images.broken ?? []} columns={["codigoInterno", "nombre", "imagenPrincipal"]} />
+      </Panel>
+      <Panel title="Conteos de negocio">
+        <DataTable rows={Object.entries(counts).map(([clave, valor]) => ({ clave, valor }))} columns={["clave", "valor"]} />
+      </Panel>
+    </div>
+  );
 }
 
 function Reports({ data }: { data: AnyRow }) {

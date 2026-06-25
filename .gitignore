@@ -33,6 +33,7 @@ test-results/
 
 # local runtime data
 data/*.db
+data/backups/
 public/pdfs/
 public/outbox/
 public/uploads/

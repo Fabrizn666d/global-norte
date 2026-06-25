@@ -998,7 +998,7 @@ function LoginView({ onUser, logoUrl }: { onUser: (user: User) => void; logoUrl:
         <TextInput name="email" label="Email o telefono" required />
         <TextInput name="password" label="Password" type="password" required />
         {error ? <p className="rounded border border-red-200 bg-red-50 px-3 py-2 text-sm font-semibold text-red-700">{error}</p> : null}
-        <button disabled={submitting} className="h-11 rounded bg-[#D32F2F] text-sm font-bold text-white hover:bg-[#B71C1C] disabled:opacity-60">{submitting ? "Ingresando" : "Ingresar"}</button>
+        <button type="submit" disabled={submitting} className="h-11 rounded bg-[#D32F2F] text-sm font-bold text-white hover:bg-[#B71C1C] disabled:opacity-60">{submitting ? "Ingresando" : "Ingresar"}</button>
         <Link href={`/registro${searchParams.get("next") ? `?next=${encodeURIComponent(searchParams.get("next") as string)}` : ""}`} className="text-center text-sm font-bold text-[#D32F2F]">Crear cuenta</Link>
       </form>
     </AuthShell>
@@ -1044,7 +1044,7 @@ function RegisterView({ onUser, logoUrl }: { onUser: (user: User) => void; logoU
           <CaptchaField />
         </div>
         {error ? <p className="rounded border border-red-200 bg-red-50 px-3 py-2 text-sm font-semibold text-red-700 md:col-span-2">{error}</p> : null}
-        <button disabled={submitting} className="h-11 rounded bg-[#D32F2F] text-sm font-bold text-white hover:bg-[#B71C1C] disabled:opacity-60 md:col-span-2">{submitting ? "Creando cuenta" : "Crear cuenta"}</button>
+        <button type="submit" disabled={submitting} className="h-11 rounded bg-[#D32F2F] text-sm font-bold text-white hover:bg-[#B71C1C] disabled:opacity-60 md:col-span-2">{submitting ? "Creando cuenta" : "Crear cuenta"}</button>
       </form>
     </AuthShell>
   );

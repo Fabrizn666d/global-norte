@@ -11,8 +11,10 @@
     "db:migrate": "prisma db push",
     "db:seed": "tsx prisma/seed.ts",
     "db:studio": "prisma studio",
+    "images:audit": "tsx scripts/audit-images.ts",
     "images:fetch": "tsx scripts/fetch-product-images.ts",
     "images:import": "tsx scripts/import-product-images.ts",
+    "images:status": "tsx scripts/image-status.ts",
     "db:reset": "prisma migrate reset --force && npm run db:seed",
     "setup": "npm run db:migrate && npm run db:seed"
   },

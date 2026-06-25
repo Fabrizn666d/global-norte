@@ -1,7 +1,8 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import sharp from "sharp";
-import { Prisma, Product, ProductImageCandidate } from "@prisma/client";
+import { Prisma, Product, ProductImageJob } from "@prisma/client";
 import { prisma } from "@/lib/db";
 import { makeSlug } from "@/lib/format";
 
@@ -27,11 +28,20 @@ export type ImageImportResult = {
   error?: string;
 };
 
+export type ImageProcessOptions = {
+  limit?: number;
+  all?: boolean;
+  retryErrors?: boolean;
+  repairBroken?: boolean;
+};
+
 const VALID_IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp", "image/avif"]);
 const AUTO_DIR = path.join(process.cwd(), "public", "uploads", "products", "auto");
 const MAX_DOWNLOAD_BYTES = Number(process.env.PRODUCT_IMAGE_MAX_BYTES ?? 8 * 1024 * 1024);
 const DOWNLOAD_TIMEOUT = Number(process.env.PRODUCT_IMAGE_TIMEOUT_MS ?? 15000);
 const AUTO_APPROVE_THRESHOLD = Number(process.env.PRODUCT_IMAGE_AUTO_APPROVE_THRESHOLD ?? 68);
+const MIN_IMAGE_WIDTH = Number(process.env.PRODUCT_IMAGE_MIN_WIDTH ?? 240);
+const MIN_IMAGE_HEIGHT = Number(process.env.PRODUCT_IMAGE_MIN_HEIGHT ?? 240);
 
 export function isFakeProductImage(src?: string | null) {
   const value = src?.trim().toLowerCase() ?? "";
@@ -59,6 +69,11 @@ export async function productNeedsImage(product: Pick<Product, "imagenPrincipal"
   return !(await localImageExists(product.imagenPrincipal));
 }
 
+function isProbablyBadImageUrl(url: string) {
+  const value = url.toLowerCase();
+  return /(logo|logotipo|banner|icon|favicon|placeholder|sprite|marca)/i.test(value);
+}
+
 export async function productsNeedingImages(limit = 30) {
   const products = await prisma.product.findMany({
     where: { activo: true },
@@ -76,6 +91,10 @@ export async function productsNeedingImages(limit = 30) {
 
 function safeFileName(product: Pick<Product, "codigoInterno" | "nombre">) {
   return `${product.codigoInterno.replace(/[^a-z0-9_-]/gi, "")}-${makeSlug(product.nombre).slice(0, 72) || "producto"}.webp`.toLowerCase();
+}
+
+function sha256(buffer: Buffer) {
+  return createHash("sha256").update(buffer).digest("hex");
 }
 
 function imagePathForProduct(product: Pick<Product, "codigoInterno" | "nombre">) {
@@ -129,6 +148,7 @@ function rejectExternalImage(url: string) {
 
 export async function downloadProductImage(product: Pick<Product, "id" | "codigoInterno" | "nombre">, imageUrl: string, sourceName: string) {
   if (rejectExternalImage(imageUrl)) throw new Error("Fuente de imagen no permitida");
+  if (isProbablyBadImageUrl(imageUrl)) throw new Error("URL parece logo/banner/placeholder");
   await fs.mkdir(AUTO_DIR, { recursive: true });
   const { localPath, fullPath } = imagePathForProduct(product);
   const buffer = await withTimeout(async (signal) => {
@@ -150,12 +170,23 @@ export async function downloadProductImage(product: Pick<Product, "id" | "codigo
   });
   const metadata = await sharp(buffer).metadata();
   if (!metadata.width || !metadata.height) throw new Error("Archivo de imagen invalido");
-  if (metadata.width < 120 || metadata.height < 120) throw new Error("Imagen demasiado pequena");
+  if (metadata.width < MIN_IMAGE_WIDTH || metadata.height < MIN_IMAGE_HEIGHT) throw new Error("Imagen demasiado pequena");
+  const aspect = metadata.width / metadata.height;
+  if (aspect < 0.45 || aspect > 2.25) throw new Error("Proporcion no parece producto");
+  const stats = await sharp(buffer).stats().catch(() => null);
+  const variation = stats?.channels.reduce((sum, channel) => sum + channel.stdev, 0) ?? 0;
+  if (variation > 0 && variation < 18) throw new Error("Imagen con poca informacion visual");
   await sharp(buffer)
     .resize({ width: 1000, height: 1000, fit: "inside", withoutEnlargement: true, background: "#ffffff" })
     .webp({ quality: 84 })
     .toFile(fullPath);
-  const stat = await fs.stat(fullPath);
+  const [stat, output] = await Promise.all([fs.stat(fullPath), fs.readFile(fullPath)]);
+  const contentHash = sha256(output);
+  const duplicate = await prisma.mediaAsset.findFirst({ where: { checksum: contentHash, entityType: "product", entityId: { not: product.id } } });
+  if (duplicate) {
+    await fs.rm(fullPath, { force: true }).catch(() => undefined);
+    throw new Error(`Imagen duplicada de otro producto: ${duplicate.path}`);
+  }
   await prisma.mediaAsset.upsert({
     where: { path: localPath },
     create: {
@@ -169,6 +200,7 @@ export async function downloadProductImage(product: Pick<Product, "id" | "codigo
       entityType: "product",
       entityId: product.id,
       createdBy: sourceName,
+      checksum: contentHash,
     },
     update: {
       originalName: path.basename(imageUrl.split("?")[0]) || `${product.codigoInterno}.webp`,
@@ -179,15 +211,19 @@ export async function downloadProductImage(product: Pick<Product, "id" | "codigo
       folder: "products/auto",
       entityType: "product",
       entityId: product.id,
+      checksum: contentHash,
     },
   });
-  return localPath;
+  return { localPath, contentHash, width: metadata.width, height: metadata.height, fileSize: stat.size };
 }
 
 export async function saveCandidate(product: ProductWithImageContext, input: ImageCandidateInput, updateProduct = true) {
   const confidence = Math.max(0, Math.min(100, Number(input.confidence ?? 0)));
   const status = input.status ?? (confidence >= AUTO_APPROVE_THRESHOLD ? "auto_approved" : "pending");
-  const localPath = input.localPath ?? (await downloadProductImage(product, input.imageUrlOriginal, input.sourceName));
+  const downloaded = input.localPath
+    ? { localPath: input.localPath, contentHash: null, width: null, height: null, fileSize: null }
+    : await downloadProductImage(product, input.imageUrlOriginal, input.sourceName);
+  const localPath = downloaded.localPath;
   const candidate = await prisma.productImageCandidate.create({
     data: {
       productId: product.id,
@@ -197,6 +233,10 @@ export async function saveCandidate(product: ProductWithImageContext, input: Ima
       sourceName: input.sourceName,
       confidence,
       status,
+      contentHash: downloaded.contentHash,
+      width: downloaded.width,
+      height: downloaded.height,
+      fileSize: downloaded.fileSize,
     },
   });
   if (updateProduct && (status === "auto_approved" || status === "approved")) {
@@ -314,11 +354,218 @@ async function searchDuckDuckGo(product: ProductWithImageContext, query: string)
 
 export function queriesForProduct(product: ProductWithImageContext) {
   const brand = product.brand?.nombre ? ` ${product.brand.nombre}` : "";
+  const compactName = product.nombre
+    .replace(/\bDE\b/gi, "")
+    .replace(/\bPRODUCTO\b/gi, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  const shortBrand = product.brand?.nombre ? product.brand.nombre : "";
+  const category = product.category?.nombre ? product.category.nombre : "";
+  const firstTokens = product.nombre.split(/[\/\s-]+/).filter(Boolean).slice(0, 4).join(" ");
   return [
+    product.nombre,
+    `${product.nombre} Peru`,
+    `${product.nombre}${brand}`,
     `${product.nombre}${brand} producto`,
     `${product.nombre} producto Peru`,
     `${product.nombre} imagen producto`,
-  ];
+    compactName,
+    `${firstTokens} ${shortBrand}`.trim(),
+    shortBrand,
+    `${shortBrand} producto`.trim(),
+    category ? `${category} ${shortBrand} producto`.trim() : "",
+    product.codigoInterno,
+  ].filter((query, index, arr) => query && arr.indexOf(query) === index);
+}
+
+async function logImageAttempt(input: {
+  productId: string;
+  query?: string;
+  sourceName: string;
+  imageUrlOriginal?: string | null;
+  sourceUrl?: string | null;
+  result: string;
+  error?: string;
+  confidence?: number;
+  localPath?: string | null;
+  contentHash?: string | null;
+}) {
+  await prisma.productImageLog.create({
+    data: {
+      productId: input.productId,
+      query: input.query,
+      sourceName: input.sourceName,
+      imageUrlOriginal: input.imageUrlOriginal,
+      sourceUrl: input.sourceUrl,
+      result: input.result,
+      error: input.error,
+      confidence: input.confidence ?? 0,
+      localPath: input.localPath,
+      contentHash: input.contentHash,
+    },
+  }).catch(() => undefined);
+}
+
+async function sourceProductImages(product: ProductWithImageContext, query: string) {
+  const before = new Set<string>();
+  const candidates: ImageCandidateInput[] = [];
+  async function collect(sourceName: string, provider: () => Promise<ImageCandidateInput[]>) {
+    try {
+      const rows = await provider();
+      for (const row of rows) {
+        if (before.has(row.imageUrlOriginal)) continue;
+        before.add(row.imageUrlOriginal);
+        candidates.push(row);
+      }
+      await logImageAttempt({ productId: product.id, query, sourceName, result: rows.length ? "candidates" : "empty" });
+    } catch (error) {
+      await logImageAttempt({ productId: product.id, query, sourceName, result: "provider_error", error: error instanceof Error ? error.message : "Error proveedor" });
+    }
+  }
+  await collect("configured_endpoint", () => searchEndpoint(product, query));
+  await collect("bing_api", () => searchBing(product, query));
+  await collect("bing_html", () => searchBingHtml(product, query));
+  await collect("duckduckgo", () => searchDuckDuckGo(product, query));
+  return candidates;
+}
+
+export async function ensureImageJobs() {
+  const products = await prisma.product.findMany({ where: { activo: true }, select: { id: true, imagenPrincipal: true } });
+  let created = 0;
+  for (const product of products) {
+    if (!(await productNeedsImage(product))) continue;
+    const existing = await prisma.productImageJob.findUnique({ where: { productId: product.id } });
+    if (!existing) {
+      await prisma.productImageJob.create({ data: { productId: product.id, status: "pending" } });
+      created += 1;
+    }
+  }
+  return created;
+}
+
+function nextRetryDate(attempts: number) {
+  const date = new Date();
+  date.setMinutes(date.getMinutes() + Math.min(1440, Math.max(5, attempts * 15)));
+  return date;
+}
+
+async function processProductImageJob(job: ProductImageJob) {
+  const product = await prisma.product.findUnique({ where: { id: job.productId }, include: { brand: true, category: true } });
+  if (!product) throw new Error("Producto no existe");
+  if (!(await productNeedsImage(product))) {
+    await prisma.productImageJob.update({ where: { id: job.id }, data: { status: "completed", completedAt: new Date(), lastError: null } });
+    return { codigoInterno: product.codigoInterno, ok: true, skipped: true, status: "completed" };
+  }
+  await prisma.productImageJob.update({ where: { id: job.id }, data: { status: "processing", lastRunAt: new Date(), attempts: { increment: 1 } } });
+  let lastError = "Sin candidato encontrado";
+  for (const query of queriesForProduct(product)) {
+    const candidates = (await sourceProductImages(product, query)).sort((a, b) => (b.confidence ?? 0) - (a.confidence ?? 0));
+    for (const candidate of candidates) {
+      try {
+        const saved = await saveCandidate(product, candidate);
+        await logImageAttempt({
+          productId: product.id,
+          query,
+          sourceName: candidate.sourceName,
+          imageUrlOriginal: candidate.imageUrlOriginal,
+          sourceUrl: candidate.sourceUrl,
+          result: saved.status,
+          confidence: saved.confidence,
+          localPath: saved.localPath,
+          contentHash: saved.contentHash,
+        });
+        await prisma.productImageJob.update({ where: { id: job.id }, data: { status: "completed", completedAt: new Date(), lastError: null, nextRunAt: null } });
+        return { codigoInterno: product.codigoInterno, ok: true, localPath: saved.localPath ?? undefined, status: saved.status };
+      } catch (error) {
+        lastError = error instanceof Error ? error.message : "Error al descargar candidato";
+        await logImageAttempt({
+          productId: product.id,
+          query,
+          sourceName: candidate.sourceName,
+          imageUrlOriginal: candidate.imageUrlOriginal,
+          sourceUrl: candidate.sourceUrl,
+          result: "download_error",
+          error: lastError,
+          confidence: candidate.confidence,
+        });
+      }
+    }
+  }
+  const freshJob = await prisma.productImageJob.findUnique({ where: { id: job.id } });
+  const attempts = (freshJob?.attempts ?? job.attempts + 1);
+  await prisma.productImageJob.update({ where: { id: job.id }, data: { status: "pending", lastError, nextRunAt: nextRetryDate(attempts) } });
+  return { codigoInterno: product.codigoInterno, ok: false, error: lastError };
+}
+
+export async function imageStatus() {
+  const products = await prisma.product.findMany({ select: { id: true, imagenPrincipal: true } });
+  let withImage = 0;
+  let missing = 0;
+  let broken = 0;
+  for (const product of products) {
+    if (await productNeedsImage(product)) {
+      missing += 1;
+      if (product.imagenPrincipal?.startsWith("/uploads/")) broken += 1;
+    } else {
+      withImage += 1;
+    }
+  }
+  const [jobs, candidates, logs, assetsWithHash] = await Promise.all([
+    prisma.productImageJob.groupBy({ by: ["status"], _count: { _all: true } }).catch(() => []),
+    prisma.productImageCandidate.groupBy({ by: ["status"], _count: { _all: true } }).catch(() => []),
+    prisma.productImageLog.findFirst({ orderBy: { createdAt: "desc" } }),
+    prisma.mediaAsset.findMany({ where: { checksum: { not: null } }, select: { checksum: true } }).catch(() => []),
+  ]);
+  const hashCounts = new Map<string, number>();
+  for (const asset of assetsWithHash) if (asset.checksum) hashCounts.set(asset.checksum, (hashCounts.get(asset.checksum) ?? 0) + 1);
+  const duplicated = Array.from(hashCounts.values()).filter((count) => count > 1).length;
+  return {
+    total: products.length,
+    withImage,
+    missing,
+    broken,
+    percent: products.length ? Math.round((withImage / products.length) * 100) : 0,
+    jobs: Object.fromEntries(jobs.map((item) => [item.status, item._count._all])),
+    candidates: Object.fromEntries(candidates.map((item) => [item.status, item._count._all])),
+    duplicates: duplicated,
+    lastLog: logs,
+  };
+}
+
+export async function processImageQueue(options: ImageProcessOptions = {}) {
+  const startedAt = Date.now();
+  await ensureImageJobs();
+  const limit = options.all ? 10000 : Math.max(1, Math.min(500, Number(options.limit ?? 50)));
+  const now = new Date();
+  const jobs = await prisma.productImageJob.findMany({
+    where: {
+      OR: [
+        { status: "pending", OR: [{ nextRunAt: null }, { nextRunAt: { lte: now } }] },
+        ...(options.retryErrors ? [{ status: "error" }] : []),
+      ],
+    },
+    orderBy: [{ priority: "desc" }, { attempts: "asc" }, { updatedAt: "asc" }],
+    take: limit,
+  });
+  const results: ImageImportResult[] = [];
+  for (const job of jobs) results.push(await processProductImageJob(job));
+  const populated = results.filter((item) => item.ok && item.localPath).length;
+  const elapsedSeconds = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
+  const status = await imageStatus();
+  return {
+    scanned: jobs.length,
+    populated,
+    results,
+    status,
+    progress: {
+      done: status.withImage,
+      total: status.total,
+      percent: status.percent,
+      elapsedSeconds,
+      speedPerMinute: Math.round((jobs.length / elapsedSeconds) * 60),
+      etaMinutes: jobs.length ? Math.ceil((status.missing / Math.max(1, jobs.length / elapsedSeconds)) / 60) : null,
+    },
+  };
 }
 
 export async function findProductImageCandidates(product: ProductWithImageContext) {
@@ -350,35 +597,7 @@ export async function findProductImageCandidates(product: ProductWithImageContex
 }
 
 export async function fetchImagesForProducts(limit = 30) {
-  const products = await productsNeedingImages(limit);
-  const results: ImageImportResult[] = [];
-  for (const product of products) {
-    try {
-      const candidates = await findProductImageCandidates(product);
-      if (!candidates.length) {
-        results.push({ codigoInterno: product.codigoInterno, ok: false, error: "Sin candidato encontrado" });
-        continue;
-      }
-      let saved: ProductImageCandidate | null = null;
-      let lastError = "";
-      for (const candidate of candidates) {
-        try {
-          saved = await saveCandidate(product, candidate);
-          break;
-        } catch (error) {
-          lastError = error instanceof Error ? error.message : "Error al descargar candidato";
-        }
-      }
-      if (!saved) {
-        results.push({ codigoInterno: product.codigoInterno, ok: false, error: lastError || "No se pudo descargar ningun candidato" });
-        continue;
-      }
-      results.push({ codigoInterno: product.codigoInterno, ok: true, localPath: saved.localPath ?? undefined, status: saved.status });
-    } catch (error) {
-      results.push({ codigoInterno: product.codigoInterno, ok: false, error: error instanceof Error ? error.message : "Error desconocido" });
-    }
-  }
-  return { scanned: products.length, populated: results.filter((item) => item.ok && item.localPath).length, results };
+  return processImageQueue({ limit });
 }
 
 export function parseImageCsv(csv: string) {
@@ -447,15 +666,19 @@ export async function rejectImageCandidate(id: string) {
 }
 
 export async function adminImageDashboard() {
-  const [pending, missingProducts, stats] = await Promise.all([
+  const [pending, missingProducts, stats, status, logs] = await Promise.all([
     prisma.productImageCandidate.findMany({ where: { status: "pending" }, include: { product: { include: { brand: true, category: true } } }, orderBy: [{ confidence: "desc" }, { createdAt: "desc" }], take: 100 }),
     productsNeedingImages(100),
     prisma.productImageCandidate.groupBy({ by: ["status"], _count: { _all: true } }),
+    imageStatus(),
+    prisma.productImageLog.findMany({ include: { product: { select: { codigoInterno: true, nombre: true } } }, orderBy: { createdAt: "desc" }, take: 50 }),
   ]);
   return {
     pending,
     missingProducts,
     stats: Object.fromEntries(stats.map((item) => [item.status, item._count._all])),
+    status,
+    logs,
   };
 }
 
@@ -479,11 +702,12 @@ export async function registerManualProductImage(productId: string, localPath: s
 }
 
 export async function retryProductImageSearch(productId: string) {
-  const product = await prisma.product.findUnique({ where: { id: productId }, include: { brand: true, category: true } });
-  if (!product) throw new Error("Producto no encontrado");
-  const [candidate] = await findProductImageCandidates(product);
-  if (!candidate) throw new Error("No se encontro imagen sugerida");
-  return saveCandidate(product, candidate);
+  const job = await prisma.productImageJob.upsert({
+    where: { productId },
+    create: { productId, status: "pending", nextRunAt: new Date(), priority: 10 },
+    update: { status: "pending", nextRunAt: new Date(), priority: 10, lastError: null },
+  });
+  return processProductImageJob(job);
 }
 
 export type ProductImageCandidateWithProduct = Prisma.ProductImageCandidateGetPayload<{

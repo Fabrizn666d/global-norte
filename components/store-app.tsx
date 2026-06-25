@@ -30,12 +30,12 @@ import {
 import { toast } from "sonner";
 import { COMPANY } from "@/lib/company";
 
-type Category = { id: string; nombre: string; slug: string; icono?: string | null; _count?: { products: number } };
-type Brand = { id: string; nombre: string; slug: string; destacada: boolean; _count?: { products: number } };
+type Category = { id: string; nombre: string; slug: string; imagen?: string | null; icono?: string | null; _count?: { products: number } };
+type Brand = { id: string; nombre: string; slug: string; logo?: string | null; destacada: boolean; _count?: { products: number } };
 type Banner = { id: string; titulo: string; subtitulo?: string | null; descripcion?: string | null; ctaTexto?: string | null; ctaLink?: string | null; imagenDesktop: string; imagenMobile?: string | null; activo: boolean; posicion?: string; tipo?: string };
 type StoreNotification = { id: string; titulo: string; mensaje: string; tipo: string };
 type CommerceBenefit = { subtotal: number; discount: number; total: number; coupon?: { code: string; description: string } | null; bonuses: Array<{ name: string; description?: string; quantity: number }>; customerBenefit?: { couponCode?: string | null; message?: string | null } | null };
-type CompanyContact = { name: string; ruc: string; whatsappDisplay: string; whatsappNumber: string; email: string; address: string };
+type CompanyContact = { name: string; legalName?: string; ruc: string; whatsappDisplay: string; whatsappNumber: string; email: string; address: string; logoUrl?: string; receiptText?: string; proformaText?: string; cartMessage?: string; checkoutMessage?: string; maintenanceMode?: boolean; socialFacebook?: string; socialInstagram?: string; socialTiktok?: string };
 type Product = {
   id: string;
   codigoInterno: string;
@@ -152,6 +152,16 @@ function imageSrc(value?: string | null) {
   return src;
 }
 
+function productImageSource(product: Product) {
+  const primary = product.imagenPrincipal?.trim();
+  if (primary && !primary.includes("picsum.photos") && primary.startsWith("/uploads/")) return primary;
+  const brand = product.brand?.logo?.trim();
+  if (brand && !brand.includes("picsum.photos")) return brand;
+  const category = product.category?.imagen?.trim();
+  if (category && !category.includes("picsum.photos")) return category;
+  return PLACEHOLDER_IMAGE;
+}
+
 function usePlaceholderImage(event: React.SyntheticEvent<HTMLImageElement>) {
   if (event.currentTarget.src.endsWith(PLACEHOLDER_IMAGE)) return;
   event.currentTarget.src = PLACEHOLDER_IMAGE;
@@ -212,6 +222,8 @@ export function StoreApp({ route }: { route: string[] }) {
   const [helpOpen, setHelpOpen] = useState(false);
   const [company, setCompany] = useState<CompanyContact>(COMPANY);
   const [cart, setCart] = useState<Cart | null>(null);
+  const [cartReady, setCartReady] = useState(false);
+  const syncedCartUser = useRef<string | null>(null);
   const [user, setUser] = useState<User | null>(null);
   const [authReady, setAuthReady] = useState(false);
   const [orders, setOrders] = useState<Order[]>([]);
@@ -263,6 +275,7 @@ export function StoreApp({ route }: { route: string[] }) {
     const saved = window.localStorage.getItem(CART_STORAGE_KEY);
     if (!saved) {
       setCart({ id: "local", items: [] });
+      setCartReady(true);
       return;
     }
     try {
@@ -271,7 +284,34 @@ export function StoreApp({ route }: { route: string[] }) {
     } catch {
       setCart({ id: "local", items: [] });
     }
+    setCartReady(true);
   }, []);
+
+  useEffect(() => {
+    if (!authReady || !cartReady || !user || !cart) return;
+    let active = true;
+    const payload = (items: CartItem[]) => items.map((item) => ({ productId: item.product.id, cantidad: item.cantidad, tipoPrecio: item.tipoPrecio }));
+    if (syncedCartUser.current !== user.id) {
+      syncedCartUser.current = user.id;
+      api<{ cart: Cart }>("/api/carrito").then(async (data) => {
+        if (!active) return;
+        const merged = new Map<string, CartItem>();
+        [...cart.items, ...(data.cart?.items ?? [])].forEach((item) => {
+          const id = makeCartItemId(item.product.id, item.tipoPrecio);
+          const previous = merged.get(id);
+          merged.set(id, { ...item, id, cantidad: Math.max(previous?.cantidad ?? 0, item.cantidad) });
+        });
+        const next = { id: "local", items: Array.from(merged.values()) };
+        saveCart(next);
+        await api("/api/carrito/sincronizar", { method: "POST", body: JSON.stringify({ items: payload(next.items) }) });
+      }).catch((error: Error) => toast.error(`No se pudo sincronizar el carrito: ${error.message}`));
+      return () => { active = false; };
+    }
+    const timeout = window.setTimeout(() => {
+      api("/api/carrito/sincronizar", { method: "POST", body: JSON.stringify({ items: payload(cart.items) }) }).catch(() => undefined);
+    }, 400);
+    return () => { active = false; window.clearTimeout(timeout); };
+  }, [authReady, cart, cartReady, saveCart, user]);
 
   useEffect(() => {
     let active = true;
@@ -377,6 +417,7 @@ export function StoreApp({ route }: { route: string[] }) {
   async function logout() {
     await api("/api/customer/logout", { method: "POST" });
     setUser(null);
+    syncedCartUser.current = null;
     router.push("/");
   }
 
@@ -411,11 +452,11 @@ export function StoreApp({ route }: { route: string[] }) {
           <div className="mx-auto grid max-w-7xl grid-cols-[auto_1fr_auto_auto] items-center gap-3 px-4 py-3 lg:grid-cols-[245px_1fr_auto_auto_auto]">
             <Link href="/" className="flex shrink-0 items-center gap-3">
               <span className="grid h-14 w-14 place-items-center rounded-2xl bg-white shadow-sm ring-1 ring-neutral-200">
-                <img src={LOGO_IMAGE} alt="Global Norte" className="h-12 w-12 object-contain" />
+                <img src={company.logoUrl || LOGO_IMAGE} alt={company.name} className="h-12 w-12 object-contain" />
               </span>
               <span className="hidden leading-tight sm:block">
-                <span className="block text-sm font-black uppercase text-[#D71920]">Global Norte</span>
-                <span className="block text-[11px] font-bold uppercase tracking-wide text-neutral-500">Distribuidora mayorista</span>
+                <span className="block text-sm font-black uppercase text-[#D71920]">{company.name}</span>
+                <span className="block text-[11px] font-bold uppercase tracking-wide text-neutral-500">{company.legalName || "Distribuidora mayorista"}</span>
               </span>
             </Link>
 
@@ -501,13 +542,13 @@ export function StoreApp({ route }: { route: string[] }) {
       {notifications.find((item) => item.tipo === "popup") ? (() => { const item = notifications.find((entry) => entry.tipo === "popup")!; return <div className="fixed inset-0 z-50 grid place-items-center bg-black/45 p-4"><div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl"><div className="flex justify-between gap-3"><h2 className="text-xl font-black">{item.titulo}</h2><button title="Cerrar" onClick={() => dismissNotification(item.id)}><X className="h-5 w-5" /></button></div><p className="mt-3 text-sm leading-6 text-neutral-600">{item.mensaje}</p></div></div>; })() : null}
 
       <main>
-        {view === "login" || (view === "clientes" && route[1] === "login") ? <LoginView onUser={setUser} /> : null}
-        {view === "registro" || (view === "clientes" && route[1] === "registro") ? <RegisterView onUser={setUser} /> : null}
+        {view === "login" || (view === "clientes" && route[1] === "login") ? <LoginView onUser={setUser} logoUrl={company.logoUrl || LOGO_IMAGE} /> : null}
+        {view === "registro" || (view === "clientes" && route[1] === "registro") ? <RegisterView onUser={setUser} logoUrl={company.logoUrl || LOGO_IMAGE} /> : null}
         {view === "carrito" ? (
-          <CartView cart={cart} total={cartTotal} user={user} banners={banners} onUpdate={updateCartItem} onRemove={removeCartItem} onClear={clearCart} />
+          <CartView cart={cart} total={cartTotal} user={user} banners={banners} message={company.cartMessage} onUpdate={updateCartItem} onRemove={removeCartItem} onClear={clearCart} />
         ) : null}
-        {view === "checkout" ? <CheckoutView cart={cart} total={cartTotal} user={user} authReady={authReady} onClear={clearCart} /> : null}
-        {view === "pedido-confirmado" ? <ConfirmedView order={order} /> : null}
+        {view === "checkout" ? <CheckoutView cart={cart} total={cartTotal} user={user} authReady={authReady} message={company.checkoutMessage} onClear={clearCart} /> : null}
+        {view === "pedido-confirmado" ? <ConfirmedView order={order} receiptText={company.receiptText} /> : null}
         {view === "mi-cuenta" ? <AccountView user={user} orders={orders} order={order} route={route} /> : null}
         {view === "catalogo" && route[1] && product ? (
           <ProductDetail product={product} related={related} onAdd={addToCart} />
@@ -525,6 +566,7 @@ export function StoreApp({ route }: { route: string[] }) {
             error={catalogError}
             onAdd={addToCart}
             onHelp={() => setHelpOpen(true)}
+            logoUrl={company.logoUrl || LOGO_IMAGE}
           />
         ) : null}
       </main>
@@ -535,7 +577,7 @@ export function StoreApp({ route }: { route: string[] }) {
       <footer className="mt-16 bg-[#151515] text-white">
         <div className="mx-auto grid max-w-7xl gap-8 px-4 py-10 md:grid-cols-[1.3fr_1fr_1fr_1fr]">
           <div>
-            <img src={LOGO_IMAGE} alt="Global Norte" className="mb-4 h-16 w-16 rounded-xl bg-white object-contain p-1" />
+            <img src={company.logoUrl || LOGO_IMAGE} alt={company.name} className="mb-4 h-16 w-16 rounded-xl bg-white object-contain p-1" />
             <p className="max-w-md text-sm leading-6 text-neutral-300">Distribuidora mayorista para bodegas, tiendas y negocios en Lima Norte. Pedido online, PDF automatico y entrega coordinada.</p>
           </div>
           <div className="text-sm text-neutral-300">
@@ -546,8 +588,8 @@ export function StoreApp({ route }: { route: string[] }) {
           </div>
           <div className="text-sm text-neutral-300">
             <p className="mb-3 font-black uppercase tracking-wide text-white">Empresa</p>
-            <p>RUC 20608628461</p>
-            <p>Carabayllo, Lima</p>
+            <p>RUC {company.ruc}</p>
+            <p>{company.address}</p>
             <p>Entrega coordinada</p>
           </div>
           <div className="text-sm text-neutral-300">
@@ -578,8 +620,8 @@ function HeaderLink({ href, label }: { href: string; label: string }) {
   );
 }
 
-function Hero({ banner, onHelp }: { banner?: Banner; onHelp: () => void }) {
-  const hasCustomImage = Boolean(banner?.imagenDesktop && banner.imagenDesktop !== LOGO_IMAGE);
+function Hero({ banner, onHelp, logoUrl }: { banner?: Banner; onHelp: () => void; logoUrl: string }) {
+  const hasCustomImage = Boolean(banner?.imagenDesktop && banner.imagenDesktop !== logoUrl);
   return (
     <section className="bg-[#F4F5F7] px-4 py-6">
       <div className="mx-auto grid max-w-7xl overflow-hidden rounded-[28px] bg-[radial-gradient(circle_at_82%_20%,rgba(255,255,255,0.28),transparent_28%),linear-gradient(135deg,#111111_0%,#D71920_48%,#F9FAFB_100%)] shadow-[0_24px_70px_rgba(17,17,17,0.18)] lg:grid-cols-[1.05fr_0.95fr]">
@@ -614,7 +656,7 @@ function Hero({ banner, onHelp }: { banner?: Banner; onHelp: () => void }) {
           ) : (
           <div className="relative ml-auto grid max-w-md gap-4 rounded-[26px] bg-white/95 p-5 shadow-2xl">
             <div className="flex items-center gap-4 rounded-2xl bg-[#151515] p-4 text-white">
-              <img src={LOGO_IMAGE} alt="Global Norte" className="h-16 w-16 rounded-xl bg-white object-contain p-1" />
+              <img src={logoUrl} alt="Global Norte" className="h-16 w-16 rounded-xl bg-white object-contain p-1" />
               <div>
                 <p className="text-xs font-black uppercase tracking-wide text-white/60">Distribuidora</p>
                 <p className="text-2xl font-black">Global Norte</p>
@@ -666,6 +708,7 @@ function CatalogView({
   error,
   onAdd,
   onHelp,
+  logoUrl,
 }: {
   view: string;
   route: string[];
@@ -678,6 +721,7 @@ function CatalogView({
   error: string | null;
   onAdd: (productId: string, tipoPrecio?: string, cantidad?: number) => Promise<void>;
   onHelp: () => void;
+  logoUrl: string;
 }) {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -717,7 +761,7 @@ function CatalogView({
 
   return (
     <>
-      {view === "home" ? <Hero banner={banners.find((banner) => banner.posicion === "hero" || banner.tipo === "principal_home")} onHelp={onHelp} /> : null}
+      {view === "home" ? <Hero banner={banners.find((banner) => banner.posicion === "hero" || banner.tipo === "principal_home")} onHelp={onHelp} logoUrl={logoUrl} /> : null}
       {view === "catalogo" && banners.find((banner) => banner.tipo === "catalogo") ? <CampaignStrip banner={banners.find((banner) => banner.tipo === "catalogo")!} /> : null}
       <section className="mx-auto max-w-7xl px-4 py-8">
         <div className="mb-5 flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
@@ -831,7 +875,7 @@ function ProductCard({ product, onAdd }: { product: Product; onAdd: (productId: 
   return (
     <article className="group overflow-hidden rounded-[20px] border border-neutral-200 bg-white shadow-sm transition duration-200 hover:-translate-y-1 hover:border-[#D71920]/40 hover:shadow-xl">
       <Link href={`/catalogo/${product.slug}`} className="block bg-gradient-to-br from-white via-[#FAFAFA] to-[#F0F0F0] p-4">
-        <ProductImage src={product.imagenPrincipal} alt={product.nombre} className="mx-auto aspect-square h-32 w-full max-w-40 object-contain transition duration-200 group-hover:scale-105 sm:h-36" loading="lazy" />
+        <ProductImage src={productImageSource(product)} alt={product.nombre} className="mx-auto aspect-square h-32 w-full max-w-40 object-contain transition duration-200 group-hover:scale-105 sm:h-36" loading="lazy" />
       </Link>
       <div className="p-3 sm:p-4">
         <div className="mb-2 flex min-h-6 flex-wrap gap-1.5">
@@ -869,7 +913,7 @@ function ProductDetail({ product, related, onAdd }: { product: Product; related:
     <section className="mx-auto max-w-7xl px-4 py-8">
       <div className="grid gap-8 lg:grid-cols-[520px_1fr]">
         <div className="aspect-square overflow-hidden rounded border border-neutral-200 bg-white">
-          <ProductImage src={product.imagenPrincipal} alt={product.nombre} className="h-full w-full object-cover" />
+          <ProductImage src={productImageSource(product)} alt={product.nombre} className="h-full w-full object-cover" />
         </div>
         <div>
           <p className="text-xs font-bold uppercase tracking-wide text-[#D32F2F]">{product.codigoInterno}</p>
@@ -926,7 +970,7 @@ function Info({ label, value }: { label: string; value?: string | null }) {
   );
 }
 
-function LoginView({ onUser }: { onUser: (user: User) => void }) {
+function LoginView({ onUser, logoUrl }: { onUser: (user: User) => void; logoUrl: string }) {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [submitting, setSubmitting] = useState(false);
@@ -949,7 +993,7 @@ function LoginView({ onUser }: { onUser: (user: User) => void }) {
     }
   }
   return (
-    <AuthShell title="Ingresar como cliente">
+    <AuthShell title="Ingresar como cliente" logoUrl={logoUrl}>
       <form onSubmit={submit} className="grid gap-3">
         <TextInput name="email" label="Email o telefono" required />
         <TextInput name="password" label="Password" type="password" required />
@@ -961,7 +1005,7 @@ function LoginView({ onUser }: { onUser: (user: User) => void }) {
   );
 }
 
-function RegisterView({ onUser }: { onUser: (user: User) => void }) {
+function RegisterView({ onUser, logoUrl }: { onUser: (user: User) => void; logoUrl: string }) {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [submitting, setSubmitting] = useState(false);
@@ -985,7 +1029,7 @@ function RegisterView({ onUser }: { onUser: (user: User) => void }) {
     }
   }
   return (
-    <AuthShell title="Registro de cliente">
+    <AuthShell title="Registro de cliente" logoUrl={logoUrl}>
       <form onSubmit={submit} className="grid gap-3 md:grid-cols-2">
         <TextInput name="nombreNegocio" label="Nombre del negocio" required />
         <TextInput name="contacto" label="Nombre de contacto" required />
@@ -1006,11 +1050,11 @@ function RegisterView({ onUser }: { onUser: (user: User) => void }) {
   );
 }
 
-function AuthShell({ title, children }: { title: string; children: React.ReactNode }) {
+function AuthShell({ title, children, logoUrl }: { title: string; children: React.ReactNode; logoUrl: string }) {
   return (
     <section className="mx-auto flex max-w-xl items-center px-4 py-10">
       <div className="w-full rounded border border-neutral-200 bg-white p-6 shadow-sm">
-        <img src={LOGO_IMAGE} alt="Global Norte" className="mx-auto mb-4 h-20 w-20 object-contain" />
+        <img src={logoUrl} alt="Global Norte" className="mx-auto mb-4 h-20 w-20 object-contain" />
         <h1 className="mb-5 text-center text-2xl font-extrabold text-neutral-950">{title}</h1>
         {children}
       </div>
@@ -1027,7 +1071,7 @@ function TextInput({ label, ...props }: React.InputHTMLAttributes<HTMLInputEleme
   );
 }
 
-function CartView({ cart, total, user, banners, onUpdate, onRemove, onClear }: { cart: Cart | null; total: number; user: User | null; banners: Banner[]; onUpdate: (id: string, cantidad: number) => Promise<void>; onRemove: (id: string) => Promise<void>; onClear: () => void }) {
+function CartView({ cart, total, user, banners, message, onUpdate, onRemove, onClear }: { cart: Cart | null; total: number; user: User | null; banners: Banner[]; message?: string; onUpdate: (id: string, cantidad: number) => Promise<void>; onRemove: (id: string) => Promise<void>; onClear: () => void }) {
   const [couponCode, setCouponCode] = useState("");
   const [benefit, setBenefit] = useState<CommerceBenefit | null>(null);
   const [applying, setApplying] = useState(false);
@@ -1056,7 +1100,7 @@ function CartView({ cart, total, user, banners, onUpdate, onRemove, onClear }: {
         </div>
         {cart.items.map((item) => (
           <div key={item.id} className="grid gap-3 rounded border border-neutral-200 bg-white p-4 sm:grid-cols-[88px_1fr_auto] sm:items-center">
-            <ProductImage src={item.product.imagenPrincipal} alt={item.product.nombre} className="h-22 w-22 aspect-square rounded object-cover" />
+            <ProductImage src={productImageSource(item.product)} alt={item.product.nombre} className="h-22 w-22 aspect-square rounded object-cover" />
             <div>
               <p className="text-sm font-extrabold text-neutral-950">{item.product.nombre}</p>
               <p className="text-xs text-neutral-500">{item.product.codigoInterno} - {item.tipoPrecio} - {money(itemPrice(item))}</p>
@@ -1083,13 +1127,13 @@ function CartView({ cart, total, user, banners, onUpdate, onRemove, onClear }: {
         <Link href={user ? "/checkout" : "/login?next=%2Fcheckout"} className="mt-5 inline-flex h-11 w-full items-center justify-center rounded bg-[#D32F2F] text-sm font-bold text-white hover:bg-[#B71C1C]">
           {user ? "Finalizar pedido" : "Ingresar para finalizar"}
         </Link>
-        <p className="mt-3 text-xs font-semibold leading-5 text-neutral-500">Completa tus datos para coordinar tu pedido. No es una compra confirmada; un asesor revisara disponibilidad y coordinara por WhatsApp.</p>
+        <p className="mt-3 text-xs font-semibold leading-5 text-neutral-500">{message || "Completa tus datos para coordinar tu pedido. No es una compra confirmada; un asesor revisara disponibilidad y coordinara por WhatsApp."}</p>
       </aside>
     </section></>
   );
 }
 
-function CheckoutView({ cart, total, user, authReady, onClear }: { cart: Cart | null; total: number; user: User | null; authReady: boolean; onClear: () => void }) {
+function CheckoutView({ cart, total, user, authReady, message, onClear }: { cart: Cart | null; total: number; user: User | null; authReady: boolean; message?: string; onClear: () => void }) {
   const router = useRouter();
   const [submitting, setSubmitting] = useState(false);
   const [couponCode, setCouponCode] = useState("");
@@ -1136,6 +1180,7 @@ function CheckoutView({ cart, total, user, authReady, onClear }: { cart: Cart | 
     <section className="mx-auto grid max-w-7xl gap-6 px-4 py-8 lg:grid-cols-[1fr_360px]">
       <form onSubmit={submit} className="rounded border border-neutral-200 bg-white p-5">
         <h1 className="mb-5 text-2xl font-extrabold text-neutral-950">Registrar pedido</h1>
+        <p className="mb-4 rounded bg-[#FFF5F5] p-3 text-sm font-semibold text-neutral-700">{message || "El pedido sera revisado y coordinado por WhatsApp."}</p>
         <div className="grid gap-3 md:grid-cols-2">
           <TextInput name="nombreNegocio" label="Nombre del negocio" defaultValue={user?.nombreNegocio ?? ""} />
           <TextInput name="contacto" label="Nombre de contacto" defaultValue={user ? `${user.nombre} ${user.apellido}` : ""} required />
@@ -1195,7 +1240,7 @@ function CheckoutView({ cart, total, user, authReady, onClear }: { cart: Cart | 
   );
 }
 
-function ConfirmedView({ order }: { order: Order | null }) {
+function ConfirmedView({ order, receiptText }: { order: Order | null; receiptText?: string }) {
   return (
     <section className="mx-auto max-w-2xl px-4 py-12">
       <div className="rounded border border-neutral-200 bg-white p-6 text-center">
@@ -1221,7 +1266,7 @@ function ConfirmedView({ order }: { order: Order | null }) {
               </div>
             </div>
             <p className="mt-4 text-xs font-semibold text-neutral-500">
-              Pedido sujeto a confirmacion de stock, precios y entrega. No es comprobante de pago.
+              {receiptText || "Pedido sujeto a confirmacion de stock, precios y entrega. No es comprobante de pago."}
             </p>
             {order.entregaMapsUrl ? <a href={order.entregaMapsUrl} target="_blank" rel="noreferrer" className="mt-3 inline-flex text-sm font-bold text-[#D71920]">Abrir ubicacion registrada</a> : null}
             <div className="mt-5 flex flex-wrap justify-center gap-3">

@@ -85,46 +85,65 @@ model Brand {
 }
 
 model Product {
-  id                String      @id @default(cuid())
-  codigoInterno     String      @unique
+  id                String                  @id @default(cuid())
+  codigoInterno     String                  @unique
   nombre            String
-  slug              String      @unique
+  slug              String                  @unique
   descripcion       String?
   categoryId        String
-  category          Category    @relation(fields: [categoryId], references: [id])
+  category          Category                @relation(fields: [categoryId], references: [id])
   brandId           String?
-  brand             Brand?      @relation(fields: [brandId], references: [id])
+  brand             Brand?                  @relation(fields: [brandId], references: [id])
   precioUnitario    Float
   precioCaja        Float?
   unidadesPorCaja   Int?
   etiquetaCaja      String?
   precioAnterior    Float?
-  stock             Int         @default(0)
-  stockMinimo       Int         @default(1)
-  unidad            String      @default("unidad")
-  imagenes          String      @default("[]")
+  stock             Int                     @default(0)
+  stockMinimo       Int                     @default(1)
+  unidad            String                  @default("unidad")
+  imagenes          String                  @default("[]")
   imagenPrincipal   String?
-  activo            Boolean     @default(true)
-  destacado         Boolean     @default(false)
-  mostrarEnHome     Boolean     @default(false)
-  ordenDestacado    Int         @default(0)
+  activo            Boolean                 @default(true)
+  destacado         Boolean                 @default(false)
+  mostrarEnHome     Boolean                 @default(false)
+  ordenDestacado    Int                     @default(0)
   etiquetaDestacada String?
-  enOferta          Boolean     @default(false)
-  nuevo             Boolean     @default(false)
-  agotado           Boolean     @default(false)
-  tags              String      @default("[]")
+  enOferta          Boolean                 @default(false)
+  nuevo             Boolean                 @default(false)
+  agotado           Boolean                 @default(false)
+  tags              String                  @default("[]")
   seoTitulo         String?
   seoDesc           String?
-  vistas            Int         @default(0)
-  vendidos          Int         @default(0)
-  createdAt         DateTime    @default(now())
-  updatedAt         DateTime    @updatedAt
+  vistas            Int                     @default(0)
+  vendidos          Int                     @default(0)
+  createdAt         DateTime                @default(now())
+  updatedAt         DateTime                @updatedAt
   orderItems        OrderItem[]
   cartItems         CartItem[]
+  imageCandidates   ProductImageCandidate[]
 
   @@index([categoryId])
   @@index([brandId])
   @@index([activo, destacado])
+}
+
+model ProductImageCandidate {
+  id               String   @id @default(cuid())
+  productId        String
+  product          Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  imageUrlOriginal String
+  localPath        String?
+  sourceUrl        String?
+  sourceName       String
+  confidence       Int      @default(0)
+  status           String   @default("pending")
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@index([productId])
+  @@index([status])
+  @@index([createdAt])
 }
 
 model Cart {
@@ -394,4 +413,39 @@ model ActivityLog {
   detalle   String?
   ip        String?
   createdAt DateTime @default(now())
+}
+
+model MediaAsset {
+  id           String   @id @default(cuid())
+  path         String   @unique
+  originalName String
+  mimeType     String
+  size         Int
+  width        Int?
+  height       Int?
+  folder       String
+  entityType   String?
+  entityId     String?
+  createdBy    String?
+  createdAt    DateTime @default(now())
+
+  @@index([entityType, entityId])
+  @@index([createdAt])
+}
+
+model BackupRecord {
+  id          String    @id @default(cuid())
+  tipo        String
+  fileName    String?
+  filePath    String?
+  size        Int       @default(0)
+  checksum    String?
+  estado      String    @default("generando")
+  error       String?
+  createdBy   String?
+  createdAt   DateTime  @default(now())
+  completedAt DateTime?
+
+  @@index([createdAt])
+  @@index([estado])
 }

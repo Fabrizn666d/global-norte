@@ -231,6 +231,21 @@ test("cupones, bonificaciones, notificaciones y consolidado funcionan", async ({
   expect(consolidatedPdf.headers()["content-type"]).toContain("application/pdf");
   expect(consolidatedCsv.headers()["content-type"]).toContain("text/csv");
 
+  await page.goto(`${baseURL}/admin/backups`, { waitUntil: "networkidle" });
+  await expect(page.getByRole("heading", { name: "Backups", level: 1 })).toBeVisible();
+  await page.getByRole("button", { name: "Backup DB" }).click();
+  await expect(page.getByText("global-norte-database")).toBeVisible({ timeout: 30000 });
+  const dbBackupHref = await page.locator("tr", { hasText: "global-norte-database" }).first().getByRole("link", { name: "Descargar" }).getAttribute("href");
+  const dbBackup = await page.request.get(`${baseURL}${dbBackupHref}`);
+  expect(dbBackup.ok()).toBeTruthy();
+  expect(dbBackup.headers()["content-type"]).toContain("application/x-sqlite3");
+  await page.getByRole("button", { name: "Backup uploads" }).click();
+  await expect(page.getByText("global-norte-uploads")).toBeVisible({ timeout: 30000 });
+  const uploadsBackupHref = await page.locator("tr", { hasText: "global-norte-uploads" }).first().getByRole("link", { name: "Descargar" }).getAttribute("href");
+  const uploadsBackup = await page.request.get(`${baseURL}${uploadsBackupHref}`);
+  expect(uploadsBackup.ok()).toBeTruthy();
+  expect(uploadsBackup.headers()["content-type"]).toContain("application/zip");
+
   const couponCode = `QA${suffix}`;
   await page.goto(`${baseURL}/admin/cupones`, { waitUntil: "networkidle" });
   await page.getByLabel("Codigo").fill(couponCode);

@@ -7,7 +7,7 @@ import { COMPANY } from "@/lib/company";
 import { prisma } from "@/lib/db";
 import { money } from "@/lib/format";
 
-type CompanyInfo = { name: string; legalName: string; ruc: string; whatsappDisplay: string; whatsappNumber: string; email: string; address: string };
+type CompanyInfo = { name: string; legalName: string; ruc: string; whatsappDisplay: string; whatsappNumber: string; email: string; address: string; logoUrl: string; receiptText: string; proformaText: string };
 
 type PdfOrder = {
   numero: string;
@@ -100,8 +100,9 @@ const styles = StyleSheet.create({
   footer: { position: "absolute", bottom: 16, left: 26, right: 26, borderTop: `1 solid ${line}`, paddingTop: 8, color: gray, fontSize: 8, textAlign: "center" },
 });
 
-async function logoSource() {
-  const file = await fs.readFile(path.join(process.cwd(), "public", "brand", "global-norte-logo.jpg"));
+async function logoSource(logoUrl: string) {
+  const safeLogo = logoUrl.startsWith("/") && !logoUrl.includes("..") ? logoUrl : "/brand/global-norte-logo.jpg";
+  const file = await fs.readFile(path.join(process.cwd(), "public", safeLogo.replace(/^\//, "")));
   const png = await sharp(file).resize({ width: 360, height: 360, fit: "inside", withoutEnlargement: true }).png().toBuffer();
   return `data:image/png;base64,${png.toString("base64")}`;
 }
@@ -120,6 +121,9 @@ async function companyInfo(): Promise<CompanyInfo> {
     whatsappNumber: settings.get("whatsapp") ?? COMPANY.whatsappNumber,
     email: settings.get("email") ?? COMPANY.email,
     address: settings.get("direccion") ?? COMPANY.address,
+    logoUrl: settings.get("logo_url") ?? "/brand/global-norte-logo.jpg",
+    receiptText: settings.get("texto_recibo") ?? "No es comprobante de pago ni factura electronica. Pedido sujeto a confirmacion.",
+    proformaText: settings.get("texto_proforma") ?? "Documento interno para validacion y preparacion del pedido.",
   };
 }
 
@@ -226,7 +230,7 @@ function ItemsTable({ order, admin = false }: { order: PdfOrder; admin?: boolean
   );
 }
 
-function TotalsAndMessage({ order, admin = false }: { order: PdfOrder; admin?: boolean }) {
+function TotalsAndMessage({ order, company, admin = false }: { order: PdfOrder; company: CompanyInfo; admin?: boolean }) {
   let bonuses: Array<{ name?: string; description?: string; quantity?: number }> = [];
   try { bonuses = JSON.parse(order.bonificaciones || "[]"); } catch { bonuses = []; }
   return (
@@ -240,7 +244,7 @@ function TotalsAndMessage({ order, admin = false }: { order: PdfOrder; admin?: b
         </Text>
         {order.cuponCodigo ? <Text style={styles.noteText}>Cupon: {order.cuponCodigo} - {clean(order.cuponDescripcion)}</Text> : null}
         {bonuses.map((bonus, index) => <Text key={`${bonus.name}-${index}`} style={styles.noteText}>Bonificacion / regalo: {bonus.quantity || 1} x {bonus.name} - {bonus.description || "Sin costo"} (S/ 0.00)</Text>)}
-        {!admin ? <Text style={styles.noteText}>No es comprobante de pago ni factura electronica. Pedido sujeto a confirmacion.</Text> : null}
+        {!admin ? <Text style={styles.noteText}>{company.receiptText}</Text> : <Text style={styles.noteText}>{company.proformaText}</Text>}
       </View>
       <View style={styles.totals}>
         <View style={styles.totalLine}><Text>Subtotal</Text><Text>{money(order.subtotal)}</Text></View>
@@ -266,7 +270,7 @@ function ClientReceipt({ order, logoSrc, company }: { order: PdfOrder; logoSrc: 
         <Header order={order} title="RECIBO DE PEDIDO" logoSrc={logoSrc} company={company} />
         <CustomerAndDelivery order={order} />
         <ItemsTable order={order} />
-        <TotalsAndMessage order={order} />
+        <TotalsAndMessage order={order} company={company} />
         <Footer company={company} />
       </Page>
     </Document>
@@ -284,7 +288,7 @@ function AdminProforma({ order, logoSrc, company }: { order: PdfOrder; logoSrc: 
         </View>
         <CustomerAndDelivery order={order} admin />
         <ItemsTable order={order} admin />
-        <TotalsAndMessage order={order} admin />
+        <TotalsAndMessage order={order} company={company} admin />
         <View style={styles.signatureRow}>
           <View style={styles.signature}><Text>Validacion de stock</Text></View>
           <View style={styles.sectionGap} />
@@ -306,9 +310,11 @@ async function writePdf(fileName: string, document: React.ReactElement) {
 }
 
 export async function createOrderPdf(order: PdfOrder) {
-  return writePdf(`${order.numero}-recibo-global-norte.pdf`, <ClientReceipt order={order} logoSrc={await logoSource()} company={await companyInfo()} />);
+  const company = await companyInfo();
+  return writePdf(`${order.numero}-recibo-global-norte.pdf`, <ClientReceipt order={order} logoSrc={await logoSource(company.logoUrl)} company={company} />);
 }
 
 export async function createAdminOrderPdf(order: PdfOrder) {
-  return writePdf(`${order.numero}-proforma-admin-global-norte.pdf`, <AdminProforma order={order} logoSrc={await logoSource()} company={await companyInfo()} />);
+  const company = await companyInfo();
+  return writePdf(`${order.numero}-proforma-admin-global-norte.pdf`, <AdminProforma order={order} logoSrc={await logoSource(company.logoUrl)} company={company} />);
 }

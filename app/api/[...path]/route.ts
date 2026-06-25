@@ -17,6 +17,16 @@ import { nextOrderNumber } from "@/lib/orders";
 import { evaluateCommerce } from "@/lib/commerce";
 import { ConsolidatedRow, createConsolidatedPdf } from "@/lib/consolidated-pdf";
 import { sendOrderEmails, sendOrderWhatsApp } from "@/lib/notifications";
+import { backupDownload, BackupType, generateBackup } from "@/lib/backups";
+import {
+  adminImageDashboard,
+  approveImageCandidate,
+  fetchImagesForProducts,
+  importProductImageCsv,
+  registerManualProductImage,
+  rejectImageCandidate,
+  retryProductImageSearch,
+} from "@/lib/product-images";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -217,6 +227,20 @@ async function requireAdmin(request: NextRequest) {
 async function getSettingsMap() {
   const settings = await prisma.setting.findMany();
   return new Map(settings.map((setting) => [setting.clave, setting.valor]));
+}
+
+async function getOrderStates() {
+  const settings = await getSettingsMap();
+  try {
+    const parsed = JSON.parse(settings.get("estados_pedido") || "[]");
+    if (Array.isArray(parsed) && parsed.every((item) => typeof item === "string")) return parsed as string[];
+  } catch {}
+  return [...ORDER_STATES];
+}
+
+async function linkMediaAsset(assetPath: string | null | undefined, entityType: string, entityId: string) {
+  if (!assetPath?.startsWith("/uploads/")) return;
+  await prisma.mediaAsset.updateMany({ where: { path: assetPath }, data: { entityType, entityId } });
 }
 
 async function getOrCreateCart(userId: string) {
@@ -424,11 +448,21 @@ async function publicGet(request: NextRequest, segments: string[]) {
     return ok({
       company: {
         name: settings.get("nombre_empresa") ?? COMPANY.name,
+        legalName: settings.get("razon_social") ?? COMPANY.legalName,
         ruc: settings.get("ruc") ?? COMPANY.ruc,
         whatsappDisplay: settings.get("telefono") ?? COMPANY.whatsappDisplay,
         whatsappNumber: settings.get("whatsapp") ?? COMPANY.whatsappNumber,
         email: settings.get("email") ?? COMPANY.email,
         address: settings.get("direccion") ?? COMPANY.address,
+        logoUrl: settings.get("logo_url") ?? "/brand/global-norte-logo.jpg",
+        receiptText: settings.get("texto_recibo") ?? "No es comprobante de pago ni factura electronica. Pedido sujeto a confirmacion.",
+        proformaText: settings.get("texto_proforma") ?? "Documento interno para validacion y preparacion del pedido.",
+        cartMessage: settings.get("mensaje_carrito") ?? "Completa tus datos para coordinar tu pedido.",
+        checkoutMessage: settings.get("mensaje_checkout") ?? "El pedido sera revisado y coordinado por WhatsApp.",
+        maintenanceMode: settings.get("modo_mantenimiento") === "true",
+        socialFacebook: settings.get("social_facebook") ?? "",
+        socialInstagram: settings.get("social_instagram") ?? "",
+        socialTiktok: settings.get("social_tiktok") ?? "",
       },
     });
   }
@@ -574,6 +608,29 @@ async function publicPost(request: NextRequest, segments: string[]) {
     const response = ok({ ok: true });
     clearSessionCookie(response, "customer");
     return response;
+  }
+
+  if (first === "carrito" && second === "sincronizar") {
+    const session = await requireCustomer(request);
+    if (!session) return fail("No autorizado", 401);
+    const body = await readJson(request);
+    const rawItems = Array.isArray(body.items) ? body.items as Array<{ productId?: unknown; cantidad?: unknown; tipoPrecio?: unknown }> : [];
+    const normalized = new Map<string, { productId: string; cantidad: number; tipoPrecio: string }>();
+    for (const item of rawItems) {
+      const productId = asString(item.productId);
+      if (!productId) continue;
+      const tipoPrecio = asString(item.tipoPrecio) === "caja" ? "caja" : "unidad";
+      normalized.set(`${productId}:${tipoPrecio}`, { productId, tipoPrecio, cantidad: Math.max(1, Number(item.cantidad ?? 1)) });
+    }
+    const validProducts = await prisma.product.findMany({ where: { id: { in: Array.from(normalized.values()).map((item) => item.productId) }, activo: true }, select: { id: true } });
+    const validIds = new Set(validProducts.map((product) => product.id));
+    const cart = await getOrCreateCart(session.id);
+    await prisma.$transaction(async (tx) => {
+      await tx.cartItem.deleteMany({ where: { cartId: cart.id } });
+      const items = Array.from(normalized.values()).filter((item) => validIds.has(item.productId));
+      if (items.length) await tx.cartItem.createMany({ data: items.map((item) => ({ ...item, cartId: cart.id })) });
+    });
+    return ok({ cart: await getOrCreateCart(session.id) });
   }
 
   if (first === "carrito" && second === "items") {
@@ -952,10 +1009,21 @@ async function adminGet(request: NextRequest, segments: string[]) {
   if (first === "categorias") return ok({ categories: await prisma.category.findMany({ include: { _count: { select: { products: true } } }, orderBy: { orden: "asc" } }) });
   if (first === "marcas") return ok({ brands: await prisma.brand.findMany({ include: { _count: { select: { products: true } } }, orderBy: { orden: "asc" } }) });
   if (first === "banners") return ok({ banners: await prisma.banner.findMany({ orderBy: { orden: "asc" } }) });
+  if (first === "imagenes") return ok(await adminImageDashboard());
   if (first === "cupones") return ok({ coupons: await prisma.coupon.findMany({ orderBy: [{ prioridad: "desc" }, { createdAt: "desc" }] }) });
   if (first === "bonificaciones") return ok({ bonuses: await prisma.bonus.findMany({ include: { cliente: { select: { id: true, nombre: true, apellido: true, nombreNegocio: true } } }, orderBy: { createdAt: "desc" } }) });
   if (first === "notificaciones") return ok({ notifications: await prisma.notification.findMany({ include: { cliente: { select: { id: true, nombre: true, apellido: true } } }, orderBy: { createdAt: "desc" } }) });
   if (first === "consolidado") return consolidatedReport(request, second);
+  if (first === "backups") {
+    if (second && third === "download") {
+      const download = await backupDownload(second);
+      if (!download) return fail("Backup no encontrado", 404);
+      const contentType = download.record.fileName?.endsWith(".zip") ? "application/zip" : "application/x-sqlite3";
+      return new NextResponse(new Uint8Array(download.file), { headers: { "Content-Type": contentType, "Content-Disposition": `attachment; filename="${download.record.fileName}"`, "Cache-Control": "no-store" } });
+    }
+    const backups = await prisma.backupRecord.findMany({ orderBy: { createdAt: "desc" }, take: 50 });
+    return ok({ backups, lastBackup: backups.find((backup) => backup.estado === "completado") ?? null });
+  }
   if (first === "clientes") {
     if (second) return customerDetail(second);
     return adminCustomers(request);
@@ -1013,6 +1081,8 @@ async function adminPost(request: NextRequest, segments: string[]) {
         agotado: body.stock <= 0,
       },
     });
+    await linkMediaAsset(product.imagenPrincipal, "product", product.id);
+    await prisma.activityLog.create({ data: { userId: session.id, accion: "crear", modulo: "productos", detalle: `${product.codigoInterno} - ${product.nombre}`, ip } });
     return ok({ product }, { status: 201 });
   }
 
@@ -1069,6 +1139,7 @@ async function adminPost(request: NextRequest, segments: string[]) {
         fechaFin: dateOrNull(body.fechaFin),
       },
     });
+    await Promise.all([linkMediaAsset(banner.imagenDesktop, "banner", banner.id), linkMediaAsset(banner.imagenMobile, "banner", banner.id)]);
     return ok({ banner }, { status: 201 });
   }
 
@@ -1093,6 +1164,7 @@ async function adminPost(request: NextRequest, segments: string[]) {
       categoryId: asString(body.categoryId) || null, brandId: asString(body.brandId) || null, clienteId: asString(body.clienteId) || null,
       beneficio: asString(body.beneficio), activo: body.activo !== false, fechaInicio: dateOrNull(body.fechaInicio), fechaFin: dateOrNull(body.fechaFin),
     } });
+    await linkMediaAsset(bonus.imagen, "bonus", bonus.id);
     return ok({ bonus }, { status: 201 });
   }
 
@@ -1104,6 +1176,45 @@ async function adminPost(request: NextRequest, segments: string[]) {
       clienteId: asString(body.clienteId) || null, activo: body.activo !== false,
     } });
     return ok({ notification }, { status: 201 });
+  }
+
+  if (first === "backups") {
+    const body = await readJson(request);
+    const type = asString(body.tipo, "complete") as BackupType;
+    if (!["database", "uploads", "pdfs", "complete"].includes(type)) return fail("Tipo de backup invalido", 400);
+    return ok({ backup: await generateBackup(type, session.id) }, { status: 201 });
+  }
+
+  if (first === "imagenes") {
+    if (second === "fetch") {
+      const body = await readJson(request);
+      const limit = Math.max(1, Math.min(100, Number(body.limit ?? 30)));
+      return ok(await fetchImagesForProducts(limit), { status: 201 });
+    }
+    if (second === "importar-csv") {
+      const contentType = request.headers.get("content-type") ?? "";
+      let csv = "";
+      if (contentType.includes("multipart/form-data")) {
+        const form = await request.formData();
+        const file = form.get("file");
+        csv = file instanceof File ? await file.text() : asString(form.get("csv"));
+      } else {
+        const body = await readJson(request);
+        csv = asString(body.csv);
+      }
+      if (!csv.trim()) return fail("CSV vacio", 400);
+      return ok(await importProductImageCsv(csv), { status: 201 });
+    }
+    if (second === "manual") {
+      const body = await readJson(request);
+      const productId = asString(body.productId);
+      const localPath = asString(body.localPath);
+      if (!productId || !localPath.startsWith("/uploads/")) return fail("Producto o ruta local invalida", 400);
+      return ok({ candidate: await registerManualProductImage(productId, localPath) }, { status: 201 });
+    }
+    if (second === "retry" && third) {
+      return ok({ candidate: await retryProductImageSearch(third) }, { status: 201 });
+    }
   }
 
   if (first === "pedidos" && second && third === "reenviar-email") {
@@ -1169,7 +1280,7 @@ async function adminPut(request: NextRequest, segments: string[]) {
 
   if (first === "pedidos" && second && (third === "estado" || third === "status")) {
     const estado = asString(body.estado);
-    if (!ORDER_STATES.includes(estado as (typeof ORDER_STATES)[number])) return fail("Estado invalido", 400);
+    if (!(await getOrderStates()).includes(estado)) return fail("Estado invalido", 400);
     const order = await prisma.order.update({
       where: { id: second },
       data: {
@@ -1178,6 +1289,7 @@ async function adminPut(request: NextRequest, segments: string[]) {
       },
       include: { historial: true, items: true },
     });
+    await prisma.activityLog.create({ data: { userId: session.id, accion: "cambiar_estado", modulo: "pedidos", detalle: `${order.numero}: ${estado}` } });
     return ok({ order });
   }
 
@@ -1194,6 +1306,8 @@ async function adminPut(request: NextRequest, segments: string[]) {
     delete (updateData as Data).brandId;
     delete (updateData as Data).categoryId;
     const product = await prisma.product.update({ where: { id: second }, data: updateData, include: { category: true, brand: true } });
+    await linkMediaAsset(product.imagenPrincipal, "product", product.id);
+    await prisma.activityLog.create({ data: { userId: session.id, accion: "editar", modulo: "productos", detalle: `${product.codigoInterno} - ${product.nombre}` } });
     return ok({ product });
   }
 
@@ -1254,6 +1368,7 @@ async function adminPut(request: NextRequest, segments: string[]) {
         fechaFin: dateOrNull(body.fechaFin),
       },
     });
+    await Promise.all([linkMediaAsset(banner.imagenDesktop, "banner", banner.id), linkMediaAsset(banner.imagenMobile, "banner", banner.id)]);
     return ok({ banner });
   }
   if (first === "cupones" && second) {
@@ -1279,6 +1394,7 @@ async function adminPut(request: NextRequest, segments: string[]) {
       clienteId: body.clienteId === undefined ? undefined : asString(body.clienteId) || null, beneficio: body.beneficio === undefined ? undefined : asString(body.beneficio),
       activo: body.activo === undefined ? undefined : Boolean(body.activo), fechaInicio: body.fechaInicio === undefined ? undefined : dateOrNull(body.fechaInicio), fechaFin: body.fechaFin === undefined ? undefined : dateOrNull(body.fechaFin),
     } });
+    await linkMediaAsset(bonus.imagen, "bonus", bonus.id);
     return ok({ bonus });
   }
 
@@ -1319,6 +1435,12 @@ async function adminPut(request: NextRequest, segments: string[]) {
     return ok({ user: { ...user, password: undefined } });
   }
 
+  if (first === "imagenes" && second && third) {
+    if (third === "aprobar") return ok({ candidate: await approveImageCandidate(second) });
+    if (third === "rechazar") return ok({ candidate: await rejectImageCandidate(second) });
+    return fail("Accion de imagen no encontrada", 404);
+  }
+
   if (first === "configuracion") {
     const entries = Array.isArray(body.settings)
       ? (body.settings as Array<{ clave: string; valor: string }>)
@@ -1332,6 +1454,7 @@ async function adminPut(request: NextRequest, segments: string[]) {
         }),
       ),
     );
+    await prisma.activityLog.create({ data: { userId: session.id, accion: "actualizar", modulo: "configuracion", detalle: `${entries.length} valores actualizados` } });
     return ok({ ok: true, settings: await prisma.setting.findMany({ orderBy: [{ grupo: "asc" }, { clave: "asc" }] }) });
   }
 
@@ -1725,7 +1848,14 @@ async function uploadFile(request: NextRequest) {
     fullPath = path.join(uploadDir, name);
     await fs.writeFile(fullPath, buffer);
   }
-  return ok({ success: true, data: { url: `/uploads/${folder}/${name}` }, url: `/uploads/${folder}/${name}` });
+  const url = `/uploads/${folder}/${name}`;
+  const [stat, metadata] = await Promise.all([fs.stat(fullPath), sharp(buffer).metadata().catch(() => null)]);
+  await prisma.mediaAsset.upsert({
+    where: { path: url },
+    create: { path: url, originalName: file.name, mimeType: file.type, size: stat.size, width: metadata?.width, height: metadata?.height, folder, createdBy: admin.id },
+    update: { originalName: file.name, mimeType: file.type, size: stat.size, width: metadata?.width, height: metadata?.height, folder },
+  });
+  return ok({ success: true, data: { url }, url });
 }
 
 export async function GET(request: NextRequest, context: Params) {

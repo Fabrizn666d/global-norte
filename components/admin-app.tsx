@@ -11,6 +11,7 @@ import {
   EyeOff,
   HelpCircle,
   Image as ImageIcon,
+  Download,
   LayoutDashboard,
   Loader2,
   LogOut,
@@ -58,9 +59,11 @@ const nav = [
   { href: "/admin/categorias", label: "Categorias", icon: Tags },
   { href: "/admin/marcas", label: "Marcas", icon: Building2 },
   { href: "/admin/banners", label: "Banners", icon: ImageIcon },
+  { href: "/admin/imagenes", label: "Imagenes", icon: ImageIcon },
   { href: "/admin/cupones", label: "Cupones", icon: TicketPercent },
   { href: "/admin/bonificaciones", label: "Bonificaciones", icon: Gift },
   { href: "/admin/notificaciones", label: "Notificaciones", icon: BellRing },
+  { href: "/admin/backups", label: "Backups", icon: Download },
   { href: "/admin/clientes", label: "Clientes", icon: UsersRound },
   { href: "/admin/reportes", label: "Reportes", icon: BarChart3 },
   { href: "/admin/configuracion", label: "Configuracion", icon: Settings },
@@ -132,12 +135,14 @@ export function AdminApp({ route }: { route: string[] }) {
   const [data, setData] = useState<AnyRow>({});
   const [categories, setCategories] = useState<AnyRow[]>([]);
   const [brands, setBrands] = useState<AnyRow[]>([]);
+  const [company, setCompany] = useState<AnyRow>(COMPANY);
   const active = route[0] ?? "dashboard";
   const detailId = route[1];
 
   const loadAdmin = useCallback(async () => {
-    const response = await api<{ admin: Admin | null }>("/api/admin/auth/me");
+    const [response, config] = await Promise.all([api<{ admin: Admin | null }>("/api/admin/auth/me"), api<{ company: AnyRow }>("/api/configuracion-publica")]);
     setAdmin(response.admin);
+    setCompany(config.company);
   }, []);
 
   const loadData = useCallback(async () => {
@@ -159,6 +164,7 @@ export function AdminApp({ route }: { route: string[] }) {
       if (active === "categorias") setData(await api("/api/admin/categorias"));
       if (active === "marcas") setData(await api("/api/admin/marcas"));
       if (active === "banners") setData(await api("/api/admin/banners"));
+      if (active === "imagenes") setData(await api("/api/admin/imagenes"));
       if (active === "cupones") setData(await api("/api/admin/cupones"));
       if (active === "bonificaciones") {
         const [bonuses, customers] = await Promise.all([api<AnyRow>("/api/admin/bonificaciones"), api<AnyRow>("/api/admin/clientes")]);
@@ -169,6 +175,7 @@ export function AdminApp({ route }: { route: string[] }) {
         setData({ ...notifications, customers: customers.users ?? [] });
       }
       if (active === "consolidado") setData(await api("/api/admin/consolidado?periodo=hoy"));
+      if (active === "backups") setData(await api("/api/admin/backups"));
       if (active === "clientes") setData(await api(detailId ? `/api/admin/clientes/${detailId}` : "/api/admin/clientes"));
       if (active === "reportes") {
         const [ventas, productos, categorias, inventario] = await Promise.all([
@@ -206,9 +213,9 @@ export function AdminApp({ route }: { route: string[] }) {
     <div className="min-h-screen bg-[#F8F8F8] text-neutral-900 lg:grid lg:grid-cols-[280px_1fr]">
       <aside className="border-r border-neutral-200 bg-white">
         <div className="flex items-center gap-3 border-b border-neutral-200 px-5 py-4">
-          <img src="/brand/global-norte-logo.jpg" alt="Global Norte" className="h-12 w-12 object-contain" />
+          <img src={company.logoUrl || "/brand/global-norte-logo.jpg"} alt={company.name || "Global Norte"} className="h-12 w-12 object-contain" />
           <div>
-            <p className="text-sm font-extrabold text-[#D32F2F]">Global Norte</p>
+            <p className="text-sm font-extrabold text-[#D32F2F]">{company.name || "Global Norte"}</p>
             <p className="text-xs font-semibold text-neutral-500">Panel Admin</p>
           </div>
         </div>
@@ -240,15 +247,17 @@ export function AdminApp({ route }: { route: string[] }) {
         <div className="p-5">
           {loading ? <Loading /> : null}
           {active === "dashboard" ? <Dashboard data={data} /> : null}
-          {active === "pedidos" ? <Orders data={data} detailId={detailId} reload={loadData} /> : null}
+          {active === "pedidos" ? <Orders data={data} detailId={detailId} reload={loadData} company={company} /> : null}
           {active === "productos" ? <Products data={data} categories={categories} brands={brands} reload={loadData} /> : null}
           {active === "categorias" ? <SimpleCrud kind="categorias" rows={data.categories ?? []} reload={loadData} /> : null}
           {active === "marcas" ? <SimpleCrud kind="marcas" rows={data.brands ?? []} reload={loadData} /> : null}
           {active === "banners" ? <Banners rows={data.banners ?? []} reload={loadData} /> : null}
+          {active === "imagenes" ? <ProductImages data={data} reload={loadData} /> : null}
           {active === "cupones" ? <Coupons rows={data.coupons ?? []} reload={loadData} /> : null}
           {active === "bonificaciones" ? <Bonuses rows={data.bonuses ?? []} customers={data.customers ?? []} reload={loadData} /> : null}
           {active === "notificaciones" ? <Notifications rows={data.notifications ?? []} customers={data.customers ?? []} reload={loadData} /> : null}
           {active === "consolidado" ? <Consolidated initial={data} /> : null}
+          {active === "backups" ? <Backups data={data} reload={loadData} /> : null}
           {active === "clientes" ? <Customers data={data} detailId={detailId} reload={loadData} /> : null}
           {active === "reportes" ? <Reports data={data} /> : null}
           {active === "configuracion" ? <SettingsView rows={data.settings ?? []} reload={loadData} /> : null}
@@ -422,7 +431,7 @@ function Panel({ title, children, help }: { title: string; children: React.React
   );
 }
 
-function Orders({ data, detailId, reload }: { data: AnyRow; detailId?: string; reload: () => void }) {
+function Orders({ data, detailId, reload, company }: { data: AnyRow; detailId?: string; reload: () => void; company: AnyRow }) {
   async function setState(id: string, estado: string) {
     await api(`/api/admin/pedidos/${id}/estado`, { method: "PUT", body: JSON.stringify({ estado }) });
     toast.success("Estado actualizado");
@@ -436,9 +445,9 @@ function Orders({ data, detailId, reload }: { data: AnyRow; detailId?: string; r
           <div className="mb-4 grid gap-3 border-b border-neutral-200 pb-4 md:grid-cols-[120px_1fr_1fr]">
             <img src={PLACEHOLDER_IMAGE} alt="Global Norte" className="h-20 w-20 object-contain" />
             <div className="text-sm">
-              <p className="font-extrabold">Distribuidora Global Norte E.I.R.L.</p>
-              <p>RUC 20608628461</p>
-              <p>Carabayllo, Lima</p>
+              <p className="font-extrabold">{company.legalName || company.name || "Distribuidora Global Norte E.I.R.L."}</p>
+              <p>RUC {company.ruc}</p>
+              <p>{company.address}</p>
             </div>
             <div className="text-sm">
               <p><strong>Cliente:</strong> {order.clienteNombre} {order.clienteApellido}</p>
@@ -456,7 +465,7 @@ function Orders({ data, detailId, reload }: { data: AnyRow; detailId?: string; r
             <a href={`/api/admin/pedidos/${order.id}/pdf`} target="_blank" rel="noreferrer" className="rounded border border-neutral-300 px-3 py-2 text-xs font-bold uppercase">PDF proforma</a>
             <button onClick={() => window.print()} className="rounded border border-neutral-300 px-3 py-2 text-xs font-bold uppercase">Imprimir</button>
             <a href={`https://wa.me/${order.clienteTelefono.replace(/\D/g, "")}?text=${encodeURIComponent(`Pedido ${order.numero}: ${money(order.total)}`)}`} target="_blank" rel="noreferrer" className="rounded border border-neutral-300 px-3 py-2 text-xs font-bold uppercase">WhatsApp</a>
-            <a href={`https://wa.me/${COMPANY.whatsappNumber}?text=${encodeURIComponent(`Nuevo pedido Global Norte\n${order.numero}\nCliente: ${order.clienteNegocio ?? `${order.clienteNombre} ${order.clienteApellido}`}\nTelefono: ${order.clienteTelefono}\nTotal: ${money(order.total)}\nDetalle: /admin/pedidos/${order.id}`)}`} target="_blank" rel="noreferrer" className="rounded border border-neutral-300 px-3 py-2 text-xs font-bold uppercase">WhatsApp interno</a>
+            <a href={`https://wa.me/${company.whatsappNumber || COMPANY.whatsappNumber}?text=${encodeURIComponent(`Nuevo pedido Global Norte\n${order.numero}\nCliente: ${order.clienteNegocio ?? `${order.clienteNombre} ${order.clienteApellido}`}\nTelefono: ${order.clienteTelefono}\nTotal: ${money(order.total)}\nDetalle: /admin/pedidos/${order.id}`)}`} target="_blank" rel="noreferrer" className="rounded border border-neutral-300 px-3 py-2 text-xs font-bold uppercase">WhatsApp interno</a>
           </div>
           <div className="grid gap-4 md:grid-cols-2">
             <Info label="Cliente" value={`${order.clienteNombre} ${order.clienteApellido}`} />
@@ -896,6 +905,166 @@ function Banners({ rows, reload }: { rows: AnyRow[]; reload: () => void }) {
   );
 }
 
+function adminImageSrc(src?: string | null) {
+  if (!src || src.includes("picsum.photos")) return "/brand/product-placeholder.svg";
+  if (src.startsWith("/uploads/")) return `/api/media${src}`;
+  return src;
+}
+
+function ProductImages({ data, reload }: { data: AnyRow; reload: () => void }) {
+  const [busy, setBusy] = useState<string | null>(null);
+  const [csv, setCsv] = useState("");
+  async function runFetch(limit = 30) {
+    setBusy("fetch");
+    try {
+      const result = await api<AnyRow>("/api/admin/imagenes/fetch", { method: "POST", body: JSON.stringify({ limit }) });
+      toast.success(`Imagenes procesadas: ${result.populated ?? 0}/${result.scanned ?? 0}`);
+      reload();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "No se pudo buscar imagenes");
+    } finally {
+      setBusy(null);
+    }
+  }
+  async function importCsv(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const file = (form.elements.namedItem("file") as HTMLInputElement | null)?.files?.[0];
+    setBusy("csv");
+    try {
+      if (file) {
+        const body = new FormData();
+        body.set("file", file);
+        const response = await fetch("/api/admin/imagenes/importar-csv", { method: "POST", body });
+        const result = (await response.json().catch(() => ({}))) as AnyRow;
+        if (!response.ok) throw new Error(result.error ?? "No se pudo importar CSV");
+        toast.success(`CSV importado: ${result.imported ?? 0}/${result.total ?? 0}`);
+      } else {
+        const result = await api<AnyRow>("/api/admin/imagenes/importar-csv", { method: "POST", body: JSON.stringify({ csv }) });
+        toast.success(`CSV importado: ${result.imported ?? 0}/${result.total ?? 0}`);
+      }
+      setCsv("");
+      form.reset();
+      reload();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "No se pudo importar CSV");
+    } finally {
+      setBusy(null);
+    }
+  }
+  async function approve(id: string) {
+    await api(`/api/admin/imagenes/${id}/aprobar`, { method: "PUT", body: JSON.stringify({}) });
+    toast.success("Imagen aprobada");
+    reload();
+  }
+  async function reject(id: string) {
+    await api(`/api/admin/imagenes/${id}/rechazar`, { method: "PUT", body: JSON.stringify({}) });
+    toast.success("Imagen rechazada");
+    reload();
+  }
+  async function retry(productId: string) {
+    setBusy(productId);
+    try {
+      await api(`/api/admin/imagenes/retry/${productId}`, { method: "POST", body: JSON.stringify({}) });
+      toast.success("Busqueda reintentada");
+      reload();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "No se encontro imagen");
+    } finally {
+      setBusy(null);
+    }
+  }
+  async function uploadManual(productId: string, file?: File) {
+    if (!file) return;
+    setBusy(productId);
+    try {
+      const localPath = await uploadAsset(file, "products");
+      await api("/api/admin/imagenes/manual", { method: "POST", body: JSON.stringify({ productId, localPath }) });
+      toast.success("Imagen manual guardada");
+      reload();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "No se pudo guardar imagen");
+    } finally {
+      setBusy(null);
+    }
+  }
+  const pending = data.pending ?? [];
+  const missing = data.missingProducts ?? [];
+  return (
+    <div className="grid gap-4">
+      <Panel title="Gestion de imagenes" help="Las imagenes se descargan al servidor, se convierten a WebP, se guardan en DB como candidatos y solo se muestran desde ruta local.">
+        <div className="grid gap-3 md:grid-cols-4">
+          <Kpi label="Pendientes" value={pending.length} />
+          <Kpi label="Sin imagen real" value={missing.length} />
+          <Kpi label="Aprobadas" value={data.stats?.approved ?? 0} />
+          <Kpi label="Autoaprobadas" value={data.stats?.auto_approved ?? 0} />
+        </div>
+        <div className="mt-4 flex flex-wrap gap-2">
+          <button disabled={Boolean(busy)} onClick={() => runFetch(30)} className="rounded bg-[#D32F2F] px-4 py-2 text-sm font-black text-white disabled:opacity-60">{busy === "fetch" ? "Buscando..." : "Buscar primeras 30"}</button>
+          <button disabled={Boolean(busy)} onClick={() => runFetch(100)} className="rounded border border-neutral-300 px-4 py-2 text-sm font-black disabled:opacity-60">Buscar 100</button>
+        </div>
+      </Panel>
+      <Panel title="Importar imagenes por CSV" help="Formato: codigoInterno,imageUrl,sourceUrl,sourceName. El sistema descarga cada imagen y guarda la ruta local en el producto.">
+        <form onSubmit={importCsv} className="grid gap-3">
+          <textarea value={csv} onChange={(event) => setCsv(event.target.value)} className="min-h-24 rounded border border-neutral-300 p-3 text-xs font-mono" placeholder="codigoInterno,imageUrl,sourceUrl,sourceName" />
+          <div className="flex flex-wrap items-center gap-2">
+            <input name="file" type="file" accept=".csv,text/csv" className="rounded border border-neutral-300 px-3 py-2 text-xs" />
+            <button disabled={busy === "csv"} className="rounded bg-neutral-900 px-4 py-2 text-sm font-black text-white disabled:opacity-60">{busy === "csv" ? "Importando..." : "Importar CSV"}</button>
+          </div>
+        </form>
+      </Panel>
+      <Panel title="Sugerencias pendientes">
+        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+          {pending.map((candidate: AnyRow) => (
+            <div key={candidate.id} className="rounded border border-neutral-200 bg-white p-3 shadow-sm">
+              <div className="flex gap-3">
+                <img src={adminImageSrc(candidate.localPath)} alt={candidate.product?.nombre ?? "Imagen sugerida"} className="h-24 w-24 rounded border border-neutral-200 object-contain" />
+                <div className="min-w-0">
+                  <p className="text-xs font-black uppercase text-[#D32F2F]">{candidate.product?.codigoInterno}</p>
+                  <p className="line-clamp-2 text-sm font-black">{candidate.product?.nombre}</p>
+                  <p className="mt-1 text-xs font-semibold text-neutral-500">{candidate.product?.brand?.nombre ?? candidate.product?.category?.nombre ?? "-"}</p>
+                  <p className="mt-1 text-xs font-bold">Confianza: {candidate.confidence}%</p>
+                  <a href={candidate.sourceUrl ?? candidate.imageUrlOriginal} target="_blank" rel="noreferrer" className="text-xs font-bold text-[#D32F2F] underline">Ver fuente</a>
+                </div>
+              </div>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <button onClick={() => approve(candidate.id)} className="rounded bg-[#D32F2F] px-3 py-1.5 text-xs font-black text-white">Aprobar</button>
+                <button onClick={() => reject(candidate.id)} className="rounded border border-neutral-300 px-3 py-1.5 text-xs font-black">Rechazar</button>
+              </div>
+            </div>
+          ))}
+          {!pending.length ? <p className="text-sm font-semibold text-neutral-500">No hay sugerencias pendientes.</p> : null}
+        </div>
+      </Panel>
+      <Panel title="Productos sin imagen real">
+        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+          {missing.map((product: AnyRow) => (
+            <div key={product.id} className="rounded border border-neutral-200 bg-white p-3 shadow-sm">
+              <div className="flex gap-3">
+                <img src={adminImageSrc(product.imagenPrincipal)} alt={product.nombre} className="h-20 w-20 rounded border border-neutral-200 object-contain" />
+                <div className="min-w-0">
+                  <p className="text-xs font-black uppercase text-[#D32F2F]">{product.codigoInterno}</p>
+                  <p className="line-clamp-2 text-sm font-black">{product.nombre}</p>
+                  <p className="text-xs font-semibold text-neutral-500">{product.brand?.nombre ?? product.category?.nombre ?? "-"}</p>
+                </div>
+              </div>
+              <div className="mt-3 flex flex-wrap items-center gap-2">
+                <button disabled={busy === product.id} onClick={() => retry(product.id)} className="rounded border border-neutral-300 px-3 py-1.5 text-xs font-black disabled:opacity-60">{busy === product.id ? "Buscando" : "Reintentar busqueda"}</button>
+                <label className="cursor-pointer rounded border border-neutral-300 px-3 py-1.5 text-xs font-black">
+                  Subir manual
+                  <input type="file" accept="image/png,image/jpeg,image/webp" className="hidden" onChange={(event) => uploadManual(product.id, event.target.files?.[0])} />
+                </label>
+                <Link href={`/admin/productos`} className="rounded border border-neutral-300 px-3 py-1.5 text-xs font-black">Ver producto</Link>
+              </div>
+            </div>
+          ))}
+          {!missing.length ? <p className="text-sm font-semibold text-neutral-500">Todos los productos revisados tienen imagen local real.</p> : null}
+        </div>
+      </Panel>
+    </div>
+  );
+}
+
 function Customers({ data, detailId, reload }: { data: AnyRow; detailId?: string; reload: () => void }) {
   if (detailId && data.user) {
     const user = data.user;
@@ -1013,6 +1182,39 @@ function Consolidated({ initial }: { initial: AnyRow }) {
     <form onSubmit={filter} className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5"><select name="periodo" defaultValue="hoy" className="h-10 rounded border bg-white px-3 text-sm"><option value="hoy">Hoy</option><option value="semana">Ultimos 7 dias</option><option value="">Personalizado</option></select><input name="mes" type="month" className="h-10 rounded border px-3 text-sm" /><input name="desde" type="date" className="h-10 rounded border px-3 text-sm" /><input name="hasta" type="date" className="h-10 rounded border px-3 text-sm" /><div className="grid grid-cols-2 gap-2"><input name="horaDesde" type="time" className="h-10 min-w-0 rounded border px-2" /><input name="horaHasta" type="time" className="h-10 min-w-0 rounded border px-2" /></div><select name="estado" className="h-10 rounded border bg-white px-3 text-sm"><option value="">Sin cancelados</option>{orderStates.map((state) => <option key={state} value={state}>{orderStateLabels[state]}</option>)}</select><button disabled={busy} className="h-10 rounded bg-[#D32F2F] px-4 text-sm font-bold text-white">{busy ? "Calculando" : "Generar"}</button></form>
     <div className="mt-4 flex flex-wrap gap-2"><a href={`/api/admin/consolidado/pdf?${query}`} target="_blank" rel="noreferrer" className="rounded border px-3 py-2 text-xs font-bold uppercase">Descargar PDF</a><a href={`/api/admin/consolidado/csv?${query}`} className="rounded border px-3 py-2 text-xs font-bold uppercase">Exportar CSV / Excel</a><button onClick={() => window.print()} className="rounded border px-3 py-2 text-xs font-bold uppercase">Imprimir</button></div>
   </Panel><div className="grid gap-4 md:grid-cols-3"><Kpi label="Pedidos" value={data.summary?.orders ?? 0} /><Kpi label="Productos agrupados" value={data.summary?.products ?? 0} /><Kpi label="Total referencial" value={money(data.summary?.total ?? 0)} /></div><Panel title="Productos para carga"><DataTable rows={data.rows ?? []} columns={["codigo", "producto", "categoria", "marca", "unidad", "cantidad", "precioReferencial", "subtotal", "pedidos", "observacion"]} /></Panel></div>;
+}
+
+function Backups({ data, reload }: { data: AnyRow; reload: () => void }) {
+  const [busy, setBusy] = useState<string | null>(null);
+  async function generate(tipo: string) {
+    setBusy(tipo);
+    try {
+      await api("/api/admin/backups", { method: "POST", body: JSON.stringify({ tipo }) });
+      toast.success("Backup generado");
+      reload();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "No se pudo generar el backup");
+    } finally {
+      setBusy(null);
+    }
+  }
+  const backups = data.backups ?? [];
+  return <div className="grid gap-4">
+    <Panel title="Backups" help="Descarga copias respaldables de SQLite, uploads, PDFs o un ZIP completo. Guarda estos archivos fuera del servidor.">
+      <div className="grid gap-3 md:grid-cols-4">
+        {[{ tipo: "database", label: "Backup DB" }, { tipo: "uploads", label: "Backup uploads" }, { tipo: "pdfs", label: "Backup PDFs" }, { tipo: "complete", label: "Descargar todo" }].map((item) => (
+          <button key={item.tipo} disabled={Boolean(busy)} onClick={() => generate(item.tipo)} className="rounded bg-[#D32F2F] px-4 py-3 text-sm font-black text-white disabled:opacity-60">{busy === item.tipo ? "Generando" : item.label}</button>
+        ))}
+      </div>
+      <div className="mt-4 rounded border border-neutral-200 bg-neutral-50 p-4 text-sm text-neutral-700">
+        <p><strong>Ultimo backup:</strong> {data.lastBackup?.completedAt ? new Date(data.lastBackup.completedAt).toLocaleString("es-PE") : "Aun no generado"}</p>
+        <p className="mt-2">Restaurar: detener PM2, reemplazar `data/globalnorte.db`, copiar `uploads/` y `pdfs/`, ejecutar `npx prisma generate`, `npx prisma db push` y reiniciar.</p>
+      </div>
+    </Panel>
+    <Panel title="Historial de backups">
+      <DataTable rows={backups.map((backup: AnyRow) => ({ ...backup, size: `${Math.round((backup.size || 0) / 1024)} KB`, fecha: backup.completedAt ? new Date(backup.completedAt).toLocaleString("es-PE") : "-" }))} columns={["tipo", "estado", "fileName", "size", "fecha", "checksum"]} renderActions={(row) => row.estado === "completado" ? <a href={`/api/admin/backups/${row.id}/download`} className="rounded border border-neutral-300 px-2 py-1 text-xs font-bold">Descargar</a> : null} />
+    </Panel>
+  </div>;
 }
 
 function Reports({ data }: { data: AnyRow }) {

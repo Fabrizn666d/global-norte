@@ -1,5 +1,7 @@
 import bcrypt from "bcryptjs";
 import { PrismaClient } from "@prisma/client";
+import fs from "node:fs/promises";
+import path from "node:path";
 import { COMPANY } from "../lib/company";
 import inventory from "./inventory.json";
 
@@ -8,8 +10,10 @@ const adminSeedPassword = process.env.ADMIN_SEED_PASSWORD;
 
 const settings = [
   { clave: "nombre_empresa", valor: "Distribuidora Global Norte E.I.R.L.", grupo: "general", label: "Nombre de la empresa" },
+  { clave: "razon_social", valor: "Distribuidora Global Norte E.I.R.L.", grupo: "general", label: "Razon social" },
   { clave: "ruc", valor: "20608628461", grupo: "general", label: "RUC" },
   { clave: "direccion", valor: "MZ. A LT. 15 A.H. RAFAEL BELAUNDE - Lima - Carabayllo", grupo: "general", label: "Direccion" },
+  { clave: "logo_url", valor: "/brand/global-norte-logo.jpg", grupo: "general", label: "Logo" },
   { clave: "telefono", valor: COMPANY.whatsappDisplay, grupo: "contacto", label: "Telefono" },
   { clave: "whatsapp", valor: COMPANY.whatsappNumber, grupo: "contacto", label: "WhatsApp" },
   { clave: "email", valor: "globalnorte@gmail.com", grupo: "contacto", label: "Email de contacto" },
@@ -35,6 +39,15 @@ const settings = [
   { clave: "login_intentos_maximos", valor: "5", tipo: "number", grupo: "seguridad", label: "Intentos maximos login" },
   { clave: "login_bloqueo_minutos", valor: "15", tipo: "number", grupo: "seguridad", label: "Minutos de bloqueo" },
   { clave: "pdf_pie_pagina", valor: "Este documento es una orden interna de pedido, no tiene validez tributaria.", grupo: "pdf", label: "Pie de pagina PDF" },
+  { clave: "texto_recibo", valor: "No es comprobante de pago ni factura electronica. Pedido sujeto a confirmacion.", grupo: "pdf", label: "Texto recibo" },
+  { clave: "texto_proforma", valor: "Documento interno para validacion y preparacion del pedido.", grupo: "pdf", label: "Texto proforma" },
+  { clave: "mensaje_carrito", valor: "Completa tus datos para coordinar tu pedido. No es una compra confirmada; un asesor revisara disponibilidad y coordinara por WhatsApp.", grupo: "tienda", label: "Mensaje carrito" },
+  { clave: "mensaje_checkout", valor: "El pedido sera revisado y coordinado por WhatsApp antes de confirmar disponibilidad y entrega.", grupo: "tienda", label: "Mensaje checkout" },
+  { clave: "modo_mantenimiento", valor: "false", tipo: "boolean", grupo: "tienda", label: "Modo mantenimiento" },
+  { clave: "social_facebook", valor: "", grupo: "social", label: "Facebook" },
+  { clave: "social_instagram", valor: "", grupo: "social", label: "Instagram" },
+  { clave: "social_tiktok", valor: "", grupo: "social", label: "TikTok" },
+  { clave: "estados_pedido", valor: JSON.stringify(["nuevo", "en_revision", "confirmado", "preparando", "entregado", "cancelado"]), tipo: "json", grupo: "pedidos", label: "Estados de pedido" },
 ];
 
 async function seedCommercialRules() {
@@ -45,6 +58,28 @@ async function seedCommercialRules() {
   });
   const existing = await prisma.bonus.findFirst({ where: { codigoInterno: "REGALO-MAYORISTA" } });
   if (!existing) await prisma.bonus.create({ data: { nombre: "Regalo mayorista", codigoInterno: "REGALO-MAYORISTA", descripcion: "Bonificacion por pedido mayorista", condicionTipo: "monto", condicionValor: 200, beneficio: "Producto de bonificacion", activo: true } });
+}
+
+async function seedMediaAssets() {
+  const [products, banners, bonuses] = await Promise.all([
+    prisma.product.findMany({ select: { id: true, imagenPrincipal: true } }),
+    prisma.banner.findMany({ select: { id: true, imagenDesktop: true, imagenMobile: true } }),
+    prisma.bonus.findMany({ select: { id: true, imagen: true } }),
+  ]);
+  const entries = [
+    ...products.map((item) => ({ path: item.imagenPrincipal, type: "product", id: item.id })),
+    ...banners.flatMap((item) => [{ path: item.imagenDesktop, type: "banner", id: item.id }, { path: item.imagenMobile, type: "banner", id: item.id }]),
+    ...bonuses.map((item) => ({ path: item.imagen, type: "bonus", id: item.id })),
+  ].filter((item): item is { path: string; type: string; id: string } => Boolean(item.path?.startsWith("/uploads/")));
+  for (const entry of entries) {
+    const filePath = path.join(process.cwd(), "public", entry.path.replace(/^\//, ""));
+    const stat = await fs.stat(filePath).catch(() => null);
+    await prisma.mediaAsset.upsert({
+      where: { path: entry.path },
+      create: { path: entry.path, originalName: path.basename(entry.path), mimeType: "application/octet-stream", size: stat?.size ?? 0, folder: entry.path.split("/")[2] ?? "uploads", entityType: entry.type, entityId: entry.id },
+      update: { size: stat?.size ?? 0, entityType: entry.type, entityId: entry.id },
+    });
+  }
 }
 
 async function main() {
@@ -93,6 +128,7 @@ async function main() {
       });
     }
     await seedCommercialRules();
+    await seedMediaAssets();
     process.stdout.write(`Seed seguro: se conservaron ${existingProducts} productos existentes.\n`);
     return;
   }
@@ -151,7 +187,6 @@ async function main() {
 
   await prisma.product.createMany({
     data: inventory.products.map((product) => {
-      const image = `https://picsum.photos/seed/${encodeURIComponent(product.codigoInterno)}/600/600`;
       return {
         codigoInterno: product.codigoInterno,
         nombre: product.nombre,
@@ -167,8 +202,8 @@ async function main() {
         stock: product.stock,
         stockMinimo: product.stockMinimo,
         unidad: product.unidad,
-        imagenes: JSON.stringify([image]),
-        imagenPrincipal: image,
+        imagenes: "[]",
+        imagenPrincipal: null,
         destacado: product.destacado,
         enOferta: product.enOferta,
         nuevo: product.nuevo,
@@ -219,6 +254,7 @@ async function main() {
     },
   });
   await seedCommercialRules();
+  await seedMediaAssets();
 
   await prisma.activityLog.create({
     data: {

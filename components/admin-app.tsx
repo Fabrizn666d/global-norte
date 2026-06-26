@@ -100,6 +100,7 @@ async function api<T>(url: string, init?: RequestInit): Promise<T> {
   const timeout = window.setTimeout(() => controller.abort(), 15000);
   const response = await fetch(url, {
     ...init,
+    credentials: "include",
     signal: init?.signal ?? controller.signal,
     headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
   }).finally(() => window.clearTimeout(timeout));
@@ -112,7 +113,7 @@ async function uploadAsset(file: File, folder: "products" | "banners") {
   const form = new FormData();
   form.set("file", file);
   form.set("folder", folder);
-  const response = await fetch("/api/admin/upload", { method: "POST", body: form });
+  const response = await fetch("/api/admin/upload", { method: "POST", body: form, credentials: "include" });
   const data = (await response.json().catch(() => ({}))) as { url?: string; data?: { url?: string }; error?: string };
   if (!response.ok) throw new Error(data.error ?? "No se pudo subir la imagen");
   return data.url ?? data.data?.url ?? "";
@@ -290,8 +291,10 @@ function AdminLogin({ onLogin, loading }: { onLogin: (admin: Admin) => void; loa
     setError(null);
     try {
       const payload = { email, password };
-      const data = await api<{ admin: Admin }>("/api/admin/auth/login", { method: "POST", body: JSON.stringify(payload) });
-      onLogin(data.admin);
+      await api<{ admin: Admin }>("/api/admin/auth/login", { method: "POST", body: JSON.stringify(payload) });
+      const verified = await api<{ admin: Admin | null }>("/api/admin/auth/me");
+      if (!verified.admin) throw new Error("No se pudo confirmar la sesion. Verifica que el navegador acepte cookies.");
+      onLogin(verified.admin);
       toast.success("Sesion iniciada");
       router.replace("/admin");
     } catch (error) {
@@ -944,7 +947,7 @@ function ProductImages({ data, reload }: { data: AnyRow; reload: () => void }) {
       if (file) {
         const body = new FormData();
         body.set("file", file);
-        const response = await fetch("/api/admin/imagenes/importar-csv", { method: "POST", body });
+        const response = await fetch("/api/admin/imagenes/importar-csv", { method: "POST", body, credentials: "include" });
         const result = (await response.json().catch(() => ({}))) as AnyRow;
         if (!response.ok) throw new Error(result.error ?? "No se pudo importar CSV");
         toast.success(`CSV importado: ${result.imported ?? 0}/${result.total ?? 0}`);
@@ -1371,7 +1374,7 @@ function Backups({ data, reload }: { data: AnyRow; reload: () => void }) {
     form.set("file", restoreFile);
     setBusy("restore-check");
     try {
-      const response = await fetch("/api/admin/backups/restore", { method: "POST", body: form });
+      const response = await fetch("/api/admin/backups/restore", { method: "POST", body: form, credentials: "include" });
       const result = (await response.json().catch(() => ({}))) as AnyRow;
       if (!response.ok) throw new Error(result.error ?? "Backup invalido");
       setRestorePlan(result.plan);
@@ -1389,7 +1392,7 @@ function Backups({ data, reload }: { data: AnyRow; reload: () => void }) {
     form.set("apply", "true");
     setBusy("restore-apply");
     try {
-      const response = await fetch("/api/admin/backups/restore", { method: "POST", body: form });
+      const response = await fetch("/api/admin/backups/restore", { method: "POST", body: form, credentials: "include" });
       const result = (await response.json().catch(() => ({}))) as AnyRow;
       if (!response.ok) throw new Error(result.error ?? "No se pudo restaurar");
       toast.success("Backup restaurado. Reinicia PM2 para recargar conexiones.");
@@ -1408,7 +1411,7 @@ function Backups({ data, reload }: { data: AnyRow; reload: () => void }) {
     form.set("file", catalogFile);
     setBusy("catalog-import");
     try {
-      const response = await fetch("/api/admin/catalogo/sincronizar", { method: "POST", body: form });
+      const response = await fetch("/api/admin/catalogo/sincronizar", { method: "POST", body: form, credentials: "include" });
       const result = (await response.json().catch(() => ({}))) as AnyRow;
       if (!response.ok) throw new Error(result.error ?? "No se pudo importar catalogo");
       toast.success(`Catalogo sincronizado: ${result.products ?? 0} productos`);

@@ -602,7 +602,7 @@ async function publicPost(request: NextRequest, segments: string[]) {
       },
     });
     const response = ok({ user: { ...user, password: undefined } });
-    await setSessionCookie(response, { id: user.id, email: user.email, role: user.rol, kind: "customer" });
+    await setSessionCookie(response, { id: user.id, email: user.email, role: user.rol, kind: "customer" }, request);
     return response;
   }
 
@@ -619,13 +619,13 @@ async function publicPost(request: NextRequest, segments: string[]) {
     }
     await prisma.user.update({ where: { id: user.id }, data: { ultimoAcceso: new Date() } });
     const response = ok({ user: { ...user, password: undefined } });
-    await setSessionCookie(response, { id: user.id, email: user.email, role: user.rol, kind: "customer" });
+    await setSessionCookie(response, { id: user.id, email: user.email, role: user.rol, kind: "customer" }, request);
     return response;
   }
 
   if (first === "auth" && second === "logout") {
     const response = ok({ ok: true });
-    clearSessionCookie(response, "customer");
+    clearSessionCookie(response, "customer", request);
     return response;
   }
 
@@ -1092,13 +1092,13 @@ async function adminPost(request: NextRequest, segments: string[]) {
     await prisma.adminUser.update({ where: { id: admin.id }, data: { ultimoAcceso: new Date() } });
     await prisma.rateLimit.delete({ where: { ip_accion: { ip: getIp(request), accion: "admin_login" } } }).catch(() => null);
     const response = ok({ admin: { ...admin, password: undefined } });
-    await setSessionCookie(response, { id: admin.id, email: admin.email, role: admin.rol, kind: "admin" });
+    await setSessionCookie(response, { id: admin.id, email: admin.email, role: admin.rol, kind: "admin" }, request);
     return response;
   }
 
   if (first === "auth" && second === "logout") {
     const response = ok({ ok: true });
-    clearSessionCookie(response, "admin");
+    clearSessionCookie(response, "admin", request);
     return response;
   }
 

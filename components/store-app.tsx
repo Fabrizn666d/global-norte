@@ -127,6 +127,7 @@ async function api<T>(url: string, init?: RequestInit): Promise<T> {
   const timeout = window.setTimeout(() => controller.abort(), 30000);
   const response = await fetch(url, {
     ...init,
+    credentials: "include",
     signal: init?.signal ?? controller.signal,
     headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
   }).finally(() => window.clearTimeout(timeout));
@@ -1003,8 +1004,10 @@ function LoginView({ onUser, logoUrl }: { onUser: (user: User) => void; logoUrl:
     setSubmitting(true);
     setError(null);
     try {
-      const data = await api<{ user: User }>("/api/customer/login", { method: "POST", body: JSON.stringify(formData(event)) });
-      onUser(data.user);
+      await api<{ user: User }>("/api/customer/login", { method: "POST", body: JSON.stringify(formData(event)) });
+      const verified = await api<{ user: User | null }>("/api/customer/me");
+      if (!verified.user) throw new Error("No se pudo confirmar la sesion. Verifica que el navegador acepte cookies.");
+      onUser(verified.user);
       toast.success("Sesion iniciada");
       router.replace(searchParams.get("next") || "/mi-cuenta/pedidos");
     } catch (error) {
@@ -1039,8 +1042,10 @@ function RegisterView({ onUser, logoUrl }: { onUser: (user: User) => void; logoU
     setError(null);
     try {
       const payload = formData(event);
-      const data = await api<{ user: User }>("/api/customer/register", { method: "POST", body: JSON.stringify(payload) });
-      onUser(data.user);
+      await api<{ user: User }>("/api/customer/register", { method: "POST", body: JSON.stringify(payload) });
+      const verified = await api<{ user: User | null }>("/api/customer/me");
+      if (!verified.user) throw new Error("No se pudo confirmar la sesion. Verifica que el navegador acepte cookies.");
+      onUser(verified.user);
       toast.success("Cuenta creada");
       router.replace(searchParams.get("next") || "/checkout");
     } catch (error) {

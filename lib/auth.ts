@@ -51,22 +51,29 @@ export async function sessionFromRequest(request: NextRequest, kind: SessionKind
   return verifySession(request.cookies.get(cookieName)?.value);
 }
 
-export async function setSessionCookie(response: NextResponse, payload: SessionPayload) {
+function isSecureRequest(request?: NextRequest) {
+  if (!request) return process.env.NODE_ENV === "production";
+  const forwardedProto = request.headers.get("x-forwarded-proto")?.split(",")[0]?.trim();
+  const forwardedSsl = request.headers.get("x-forwarded-ssl");
+  return forwardedProto === "https" || forwardedSsl === "on" || request.nextUrl.protocol === "https:";
+}
+
+export async function setSessionCookie(response: NextResponse, payload: SessionPayload, request?: NextRequest) {
   const cookieName = payload.kind === "admin" ? ADMIN_COOKIE : CUSTOMER_COOKIE;
   response.cookies.set(cookieName, await signSession(payload), {
     httpOnly: true,
     sameSite: "lax",
-    secure: process.env.NODE_ENV === "production",
+    secure: isSecureRequest(request),
     path: "/",
     maxAge: 60 * 60 * 8,
   });
 }
 
-export function clearSessionCookie(response: NextResponse, kind: SessionKind) {
+export function clearSessionCookie(response: NextResponse, kind: SessionKind, request?: NextRequest) {
   response.cookies.set(kind === "admin" ? ADMIN_COOKIE : CUSTOMER_COOKIE, "", {
     httpOnly: true,
     sameSite: "lax",
-    secure: process.env.NODE_ENV === "production",
+    secure: isSecureRequest(request),
     path: "/",
     maxAge: 0,
   });

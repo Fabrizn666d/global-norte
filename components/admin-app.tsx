@@ -310,7 +310,7 @@ function AdminLogin({ onLogin, loading }: { onLogin: (admin: Admin) => void; loa
     <div className="grid min-h-screen place-items-center bg-[#F8F8F8] px-4">
       <form onSubmit={submit} className="w-full max-w-md rounded border border-neutral-200 bg-white p-6 shadow-sm">
         <img src="/brand/global-norte-logo.jpg" alt="Global Norte" className="mx-auto mb-4 h-20 w-20 object-contain" />
-        <h1 className="mb-5 text-center text-2xl font-extrabold">Global Norte - Panel Admin</h1>
+        <h1 className="mb-5 text-center text-2xl font-extrabold">Global Norte Perú</h1>
         <Field name="email" label="Email" type="email" value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="off" placeholder="admin@empresa.com" required />
         <label className="mb-3 grid gap-1 text-sm font-semibold text-neutral-700">
           Password

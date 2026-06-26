@@ -87,6 +87,19 @@ function money(value: number) {
   return `S/ ${Number(value || 0).toFixed(2)}`;
 }
 
+function dateTime(value?: string | Date | null) {
+  if (!value) return "-";
+  return new Intl.DateTimeFormat("es-PE", {
+    timeZone: "America/Lima",
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(new Date(value));
+}
+
 function jsonValues(value?: string | null) {
   try { const parsed = JSON.parse(value || "[]"); return Array.isArray(parsed) ? parsed.join(", ") : ""; } catch { return value || ""; }
 }
@@ -446,6 +459,14 @@ function Orders({ data, detailId, reload, company }: { data: AnyRow; detailId?: 
     toast.success("Estado actualizado");
     reload();
   }
+  async function deleteOrder(order: AnyRow) {
+    const motivo = window.prompt(`Motivo para eliminar/anular el pedido ${order.numero}:`, "Eliminado desde panel admin");
+    if (motivo === null) return;
+    if (!window.confirm(`Eliminar pedido ${order.numero}? No se borrara fisicamente, pero dejara de aparecer en listados y consolidado.`)) return;
+    await api(`/api/admin/pedidos/${order.id}`, { method: "DELETE", body: JSON.stringify({ motivo }) });
+    toast.success("Pedido eliminado del listado operativo");
+    reload();
+  }
   if (detailId && data.order) {
     const order = data.order;
     return (
@@ -464,15 +485,17 @@ function Orders({ data, detailId, reload, company }: { data: AnyRow; detailId?: 
               <p><strong>Negocio:</strong> {order.clienteNegocio ?? "-"}</p>
             </div>
           </div>
-          <div className="mb-4 flex flex-wrap gap-2">
-            {orderStates.map((state) => (
-              <button key={state} onClick={() => setState(order.id, state)} className={`rounded border px-3 py-2 text-xs font-bold uppercase ${order.estado === state ? "border-[#D32F2F] bg-[#FFF5F5] text-[#D32F2F]" : "border-neutral-300"}`}>
-                {orderStateLabels[state] ?? state}
-              </button>
-            ))}
+          <div className="mb-4 flex flex-wrap items-center gap-2">
+            <label className="inline-flex items-center gap-2 text-xs font-bold uppercase text-neutral-600">
+              Estado
+              <select value={order.estado} onChange={(event) => setState(order.id, event.target.value)} className="h-9 rounded border border-neutral-300 bg-white px-3 text-xs font-bold">
+                {orderStates.map((state) => <option key={state} value={state}>{orderStateLabels[state] ?? state}</option>)}
+              </select>
+            </label>
             {order.pdfUrl ? <a href={`/api/pdf/${order.id}`} target="_blank" rel="noreferrer" className="rounded border border-neutral-300 px-3 py-2 text-xs font-bold uppercase">PDF cliente</a> : null}
             <a href={`/api/admin/pedidos/${order.id}/pdf`} target="_blank" rel="noreferrer" className="rounded border border-neutral-300 px-3 py-2 text-xs font-bold uppercase">PDF proforma</a>
             <button onClick={() => window.print()} className="rounded border border-neutral-300 px-3 py-2 text-xs font-bold uppercase">Imprimir</button>
+            {!order.deletedAt ? <button onClick={() => deleteOrder(order)} className="rounded border border-red-200 px-3 py-2 text-xs font-bold uppercase text-red-700">Eliminar pedido</button> : null}
             <a href={`https://wa.me/${order.clienteTelefono.replace(/\D/g, "")}?text=${encodeURIComponent(`Pedido ${order.numero}: ${money(order.total)}`)}`} target="_blank" rel="noreferrer" className="rounded border border-neutral-300 px-3 py-2 text-xs font-bold uppercase">WhatsApp</a>
             <a href={`https://wa.me/${company.whatsappNumber || COMPANY.whatsappNumber}?text=${encodeURIComponent(`Nuevo pedido Global Norte\n${order.numero}\nCliente: ${order.clienteNegocio ?? `${order.clienteNombre} ${order.clienteApellido}`}\nTelefono: ${order.clienteTelefono}\nTotal: ${money(order.total)}\nDetalle: /admin/pedidos/${order.id}`)}`} target="_blank" rel="noreferrer" className="rounded border border-neutral-300 px-3 py-2 text-xs font-bold uppercase">WhatsApp interno</a>
           </div>
@@ -482,6 +505,8 @@ function Orders({ data, detailId, reload, company }: { data: AnyRow; detailId?: 
             <Info label="Metodo de entrega" value={order.metodoEntrega ?? "coordinada"} />
             <Info label="Telefono" value={order.clienteTelefono} />
             <Info label="Total" value={money(order.total)} />
+            <Info label="Creacion" value={dateTime(order.createdAt)} />
+            <Info label="Ultima actualizacion" value={dateTime(order.updatedAt)} />
           </div>
           {order.entregaMapsUrl ? <a href={order.entregaMapsUrl} target="_blank" rel="noreferrer" className="mt-4 inline-flex rounded bg-[#D32F2F] px-4 py-2 text-sm font-bold text-white">Abrir ubicacion</a> : null}
         </Panel>
@@ -491,14 +516,15 @@ function Orders({ data, detailId, reload, company }: { data: AnyRow; detailId?: 
           {order.cuponCodigo ? <p className="mt-3 text-sm font-bold text-green-700">Cupon {order.cuponCodigo}: -{money(order.descuento)}</p> : null}
           {JSON.parse(order.bonificaciones || "[]").map((bonus: AnyRow, index: number) => <p key={`${bonus.name}-${index}`} className="mt-2 text-sm font-bold text-amber-700">Bonificacion / regalo: {bonus.name} (S/ 0.00)</p>)}
           {order.notasCliente ? <p className="mt-3 text-sm text-neutral-600">Observaciones: {order.notasCliente}</p> : null}
+          {order.historial?.length ? <div className="mt-4 rounded border border-neutral-200 bg-neutral-50 p-3 text-sm"><p className="mb-2 font-extrabold">Historial</p>{order.historial.map((item: AnyRow) => <p key={item.id} className="py-1"><strong>{dateTime(item.createdAt)}</strong> - {orderStateLabels[item.estado] ?? item.estado}{item.nota ? `: ${item.nota}` : ""}</p>)}</div> : null}
         </Panel>
       </div>
     );
   }
-  return <AdvancedOrders initial={data} />;
+  return <AdvancedOrders initial={data} onDelete={deleteOrder} />;
 }
 
-function AdvancedOrders({ initial }: { initial: AnyRow }) {
+function AdvancedOrders({ initial, onDelete }: { initial: AnyRow; onDelete: (order: AnyRow) => Promise<void> }) {
   const [result, setResult] = useState(initial);
   const [busy, setBusy] = useState(false);
   useEffect(() => setResult(initial), [initial]);
@@ -529,6 +555,7 @@ function AdvancedOrders({ initial }: { initial: AnyRow }) {
           <div className="grid grid-cols-2 gap-2"><input name="horaDesde" type="time" className="h-10 min-w-0 rounded border border-neutral-300 px-2 text-sm" /><input name="horaHasta" type="time" className="h-10 min-w-0 rounded border border-neutral-300 px-2 text-sm" /></div>
           <input name="q" placeholder="Cliente o telefono" className="h-10 rounded border border-neutral-300 px-3 text-sm" />
           <select name="estado" className="h-10 rounded border border-neutral-300 bg-white px-3 text-sm"><option value="">Estado</option>{orderStates.map((state) => <option key={state} value={state}>{orderStateLabels[state]}</option>)}</select>
+          <label className="inline-flex h-10 items-center gap-2 rounded border border-neutral-300 px-3 text-sm font-semibold"><input name="eliminados" type="checkbox" value="1" /> Ver eliminados</label>
           <select name="metodoEntrega" className="h-10 rounded border border-neutral-300 bg-white px-3 text-sm"><option value="">Entrega</option><option value="coordinada">Coordinada</option><option value="recojo">Recojo</option></select>
           <select name="metodoPago" className="h-10 rounded border border-neutral-300 bg-white px-3 text-sm"><option value="">Pago</option><option value="efectivo">Efectivo</option><option value="transferencia">Transferencia</option><option value="yape">Yape</option><option value="plin">Plin</option></select>
           <div className="grid grid-cols-2 gap-2"><input name="totalMin" type="number" step="0.01" placeholder="Total min." className="h-10 min-w-0 rounded border border-neutral-300 px-2 text-sm" /><input name="totalMax" type="number" step="0.01" placeholder="Total max." className="h-10 min-w-0 rounded border border-neutral-300 px-2 text-sm" /></div>
@@ -539,12 +566,12 @@ function AdvancedOrders({ initial }: { initial: AnyRow }) {
         <Panel title="Productos mas pedidos"><DataTable rows={result.month?.topProducts ?? []} columns={["nombre", "cantidad"]} /></Panel>
         <Panel title="Clientes con mas pedidos"><DataTable rows={result.month?.topCustomers ?? []} columns={["cliente", "pedidos"]} /></Panel>
       </div>
-      <Panel title="Pedidos" help="Listado operativo filtrado."><OrdersTable orders={result.orders ?? []} /></Panel>
+      <Panel title="Pedidos" help="Listado operativo filtrado."><OrdersTable orders={result.orders ?? []} onDelete={onDelete} /></Panel>
     </div>
   );
 }
 
-function OrdersTable({ orders }: { orders: AnyRow[] }) {
+function OrdersTable({ orders, onDelete }: { orders: AnyRow[]; onDelete?: (order: AnyRow) => Promise<void> }) {
   const [q, setQ] = useState("");
   const [estado, setEstado] = useState("");
   const filtered = orders.filter((order) => {
@@ -583,13 +610,17 @@ function OrdersTable({ orders }: { orders: AnyRow[] }) {
               <td className="px-3 py-3 font-bold">{order.numero}</td>
               <td className="px-3 py-3">{order.clienteNegocio ?? `${order.clienteNombre} ${order.clienteApellido}`}</td>
               <td className="px-3 py-3">{order.clienteTelefono}</td>
-              <td className="px-3 py-3">{order.createdAt ? new Date(order.createdAt).toLocaleDateString("es-PE") : "-"}</td>
+              <td className="px-3 py-3">{dateTime(order.createdAt)}</td>
               <td className="px-3 py-3">{order.items?.length ?? 0}</td>
               <td className="px-3 py-3 font-bold text-[#D32F2F]">{money(order.total)}</td>
               <td className="px-3 py-3">{order.metodoPago}</td>
               <td className="px-3 py-3">{orderStateLabels[order.estado] ?? order.estado}</td>
               <td className="px-3 py-3">
-                <Link href={`/admin/pedidos/${order.id}`} className="rounded border border-neutral-300 px-2 py-1 text-xs font-bold">Ver</Link>
+                <div className="flex flex-wrap gap-2">
+                  <Link href={`/admin/pedidos/${order.id}`} className="rounded border border-neutral-300 px-2 py-1 text-xs font-bold">Ver detalle</Link>
+                  {order.pdfUrl ? <a href={`/api/pdf/${order.id}`} target="_blank" rel="noreferrer" className="rounded border border-neutral-300 px-2 py-1 text-xs font-bold">PDF</a> : null}
+                  {onDelete && !order.deletedAt ? <button onClick={() => onDelete(order)} className="rounded border border-red-200 px-2 py-1 text-xs font-bold text-red-700">Eliminar pedido</button> : null}
+                </div>
               </td>
             </tr>
           ))}
@@ -1159,6 +1190,29 @@ function ProductImages({ data, reload }: { data: AnyRow; reload: () => void }) {
 }
 
 function Customers({ data, detailId, reload }: { data: AnyRow; detailId?: string; reload: () => void }) {
+  const [list, setList] = useState<AnyRow[] | null>(null);
+  const [showInactive, setShowInactive] = useState(false);
+  const customers = list ?? data.users ?? [];
+  async function loadCustomers(includeInactive: boolean) {
+    setShowInactive(includeInactive);
+    const result = await api<AnyRow>(`/api/admin/clientes${includeInactive ? "?desactivados=1" : ""}`);
+    setList(result.users ?? []);
+  }
+  async function removeCustomer(user: AnyRow) {
+    const motivo = window.prompt(`Motivo para eliminar/desactivar ${user.email}:`, "Limpieza de cuentas de prueba");
+    if (motivo === null) return;
+    if (!window.confirm(`Continuar con ${user.email}? Si tiene pedidos se desactivara; si no tiene pedidos se eliminara definitivamente.`)) return;
+    const result = await api<{ mode?: string }>(`/api/admin/clientes/${user.id}`, { method: "DELETE", body: JSON.stringify({ motivo }) });
+    toast.success(result.mode === "deleted" ? "Cliente eliminado definitivamente" : "Cliente desactivado");
+    await loadCustomers(showInactive);
+  }
+  async function deactivateCustomer(user: AnyRow) {
+    const motivo = window.prompt(`Motivo para desactivar ${user.email}:`, "Desactivado desde panel admin");
+    if (motivo === null) return;
+    await api(`/api/admin/clientes/${user.id}`, { method: "POST", body: JSON.stringify({ activo: false, bloqueado: true, motivoBloqueo: motivo }) });
+    toast.success("Cliente desactivado");
+    await loadCustomers(showInactive);
+  }
   if (detailId && data.user) {
     const user = data.user;
     return (
@@ -1191,7 +1245,7 @@ function Customers({ data, detailId, reload }: { data: AnyRow; detailId?: string
       </div>
     );
   }
-  const rows = (data.users ?? []).map((user: AnyRow) => ({
+  const rows = customers.map((user: AnyRow) => ({
     id: user.id,
     nombre: `${user.nombre} ${user.apellido}`,
     email: user.email,
@@ -1203,7 +1257,21 @@ function Customers({ data, detailId, reload }: { data: AnyRow; detailId?: string
   }));
   return (
     <Panel title="Clientes">
-      <DataTable rows={rows} columns={["nombre", "email", "telefono", "negocio", "pedidos", "totalComprado", "estado"]} linkPrefix="/admin/clientes" />
+      <div className="mb-3 flex flex-wrap gap-2">
+        <button onClick={() => loadCustomers(false)} className={`rounded border px-3 py-2 text-xs font-bold ${!showInactive ? "border-[#D32F2F] text-[#D32F2F]" : "border-neutral-300"}`}>Activos</button>
+        <button onClick={() => loadCustomers(true)} className={`rounded border px-3 py-2 text-xs font-bold ${showInactive ? "border-[#D32F2F] text-[#D32F2F]" : "border-neutral-300"}`}>Ver desactivados</button>
+      </div>
+      <DataTable
+        rows={rows}
+        columns={["nombre", "email", "telefono", "negocio", "pedidos", "totalComprado", "estado"]}
+        linkPrefix="/admin/clientes"
+        renderActions={(row) => (
+          <div className="flex flex-wrap gap-2">
+            <button onClick={() => deactivateCustomer(row)} className="rounded border border-neutral-300 px-2 py-1 text-xs font-bold">Desactivar cliente</button>
+            <button onClick={() => removeCustomer(row)} className="rounded border border-red-200 px-2 py-1 text-xs font-bold text-red-700">Eliminar cliente</button>
+          </div>
+        )}
+      />
     </Panel>
   );
 }
@@ -1343,11 +1411,23 @@ function Consolidated({ initial }: { initial: AnyRow }) {
   const [query, setQuery] = useState("periodo=hoy");
   const [busy, setBusy] = useState(false);
   useEffect(() => setData(initial), [initial]);
+  async function loadQuick(next: string) {
+    setQuery(next);
+    setBusy(true);
+    try { setData(await api(`/api/admin/consolidado?${next}`)); }
+    catch (error) { toast.error(error instanceof Error ? error.message : "No se pudo generar"); }
+    finally { setBusy(false); }
+  }
   async function filter(event: FormEvent<HTMLFormElement>) { event.preventDefault(); const params = new URLSearchParams(formData(event) as Record<string, string>); Array.from(params.entries()).forEach(([key, value]) => { if (!value) params.delete(key); }); const next = params.toString(); setQuery(next); setBusy(true); try { setData(await api(`/api/admin/consolidado?${next}`)); } catch (error) { toast.error(error instanceof Error ? error.message : "No se pudo generar"); } finally { setBusy(false); } }
   return <div className="grid gap-4"><Panel title="Consolidado de carga" help="Suma los productos de todos los pedidos filtrados para preparar y cargar el camion.">
-    <form onSubmit={filter} className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5"><select name="periodo" defaultValue="hoy" className="h-10 rounded border bg-white px-3 text-sm"><option value="hoy">Hoy</option><option value="semana">Ultimos 7 dias</option><option value="">Personalizado</option></select><input name="mes" type="month" className="h-10 rounded border px-3 text-sm" /><input name="desde" type="date" className="h-10 rounded border px-3 text-sm" /><input name="hasta" type="date" className="h-10 rounded border px-3 text-sm" /><div className="grid grid-cols-2 gap-2"><input name="horaDesde" type="time" className="h-10 min-w-0 rounded border px-2" /><input name="horaHasta" type="time" className="h-10 min-w-0 rounded border px-2" /></div><select name="estado" className="h-10 rounded border bg-white px-3 text-sm"><option value="">Sin cancelados</option>{orderStates.map((state) => <option key={state} value={state}>{orderStateLabels[state]}</option>)}</select><button disabled={busy} className="h-10 rounded bg-[#D32F2F] px-4 text-sm font-bold text-white">{busy ? "Calculando" : "Generar"}</button></form>
-    <div className="mt-4 flex flex-wrap gap-2"><a href={`/api/admin/consolidado/pdf?${query}`} target="_blank" rel="noreferrer" className="rounded border px-3 py-2 text-xs font-bold uppercase">Descargar PDF</a><a href={`/api/admin/consolidado/csv?${query}`} className="rounded border px-3 py-2 text-xs font-bold uppercase">Exportar CSV / Excel</a><button onClick={() => window.print()} className="rounded border px-3 py-2 text-xs font-bold uppercase">Imprimir</button></div>
-  </Panel><div className="grid gap-4 md:grid-cols-3"><Kpi label="Pedidos" value={data.summary?.orders ?? 0} /><Kpi label="Productos agrupados" value={data.summary?.products ?? 0} /><Kpi label="Total referencial" value={money(data.summary?.total ?? 0)} /></div><Panel title="Productos para carga"><DataTable rows={data.rows ?? []} columns={["codigo", "producto", "categoria", "marca", "unidad", "cantidad", "precioReferencial", "subtotal", "pedidos", "observacion"]} /></Panel></div>;
+    <div className="flex flex-wrap gap-2">
+      {[["Hoy", "periodo=hoy"], ["Ayer", "periodo=ayer"], ["Esta semana", "periodo=semana"], ["Este mes", "periodo=mes"], ["Todos", "periodo=todos"]].map(([label, value]) => (
+        <button key={value} onClick={() => loadQuick(value)} className={`rounded border px-3 py-2 text-xs font-bold uppercase ${query === value ? "border-[#D32F2F] text-[#D32F2F]" : "border-neutral-300"}`}>{label}</button>
+      ))}
+    </div>
+    <form onSubmit={filter} className="mt-4 grid gap-3 sm:grid-cols-[220px_auto]"><input name="fecha" type="date" className="h-10 rounded border px-3 text-sm" /><button disabled={busy} className="h-10 rounded bg-[#D32F2F] px-4 text-sm font-bold text-white">{busy ? "Calculando" : "Generar por fecha"}</button></form>
+    <div className="mt-4 flex flex-wrap gap-2"><a href={`/api/admin/consolidado/pdf?${query}`} target="_blank" rel="noreferrer" className="rounded border px-3 py-2 text-xs font-bold uppercase">Descargar PDF</a><a href={`/api/admin/consolidado/csv?${query}`} className="rounded border px-3 py-2 text-xs font-bold uppercase">Descargar CSV</a><button onClick={() => window.print()} className="rounded border px-3 py-2 text-xs font-bold uppercase">Imprimir</button></div>
+  </Panel><div className="grid gap-4 md:grid-cols-3"><Kpi label="Pedidos" value={data.summary?.orders ?? 0} /><Kpi label="Productos agrupados" value={data.summary?.products ?? 0} /><Kpi label="Total referencial" value={money(data.summary?.total ?? 0)} /></div><Panel title="Productos para carga"><DataTable rows={data.rows ?? []} columns={["codigo", "producto", "categoria", "marca", "cantidad", "unidad", "subtotal"]} /></Panel></div>;
 }
 
 function Backups({ data, reload }: { data: AnyRow; reload: () => void }) {

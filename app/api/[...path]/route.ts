@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { randomBytes } from "node:crypto";
 import bcrypt from "bcryptjs";
 import sharp from "sharp";
 import { Prisma } from "@prisma/client";
@@ -91,6 +92,8 @@ const checkoutSchema = z.object({
   mapsUrl: z.string().url().optional().or(z.literal("")),
   couponCode: z.string().optional(),
   notas: z.string().optional(),
+  appendToOrderId: z.string().optional(),
+  guestToken: z.string().optional(),
   items: z.array(z.object({
     productId: z.string().min(1),
     cantidad: z.coerce.number().int().positive(),
@@ -199,6 +202,33 @@ function splitContact(contact?: string | null) {
 
 function normalizeCustomerEmail(email: string | undefined, telefono: string) {
   return email?.trim().toLowerCase() || `${telefono.replace(/\D/g, "")}@clientes.globalnorte.local`;
+}
+
+const HIDDEN_ORDER_STATES = ["eliminado", "anulado", "cancelado"];
+const RECENT_ORDER_WINDOW_MS = 5 * 60 * 1000;
+
+function activeOrderWhere(extra: Prisma.OrderWhereInput = {}): Prisma.OrderWhereInput {
+  return {
+    deletedAt: null,
+    estado: { notIn: HIDDEN_ORDER_STATES },
+    ...extra,
+  };
+}
+
+function peruDateTime(value: Date | string) {
+  return new Intl.DateTimeFormat("es-PE", {
+    timeZone: "America/Lima",
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(new Date(value));
+}
+
+function orderItemKey(productId: string, tipoPrecio: string) {
+  return `${productId}:${tipoPrecio}`;
 }
 
 function customerAuthSegments(segments: string[]) {
@@ -514,11 +544,33 @@ async function publicGet(request: NextRequest, segments: string[]) {
     const session = await requireCustomer(request);
     if (!session) return fail("No autorizado", 401);
     const orders = await prisma.order.findMany({
-      where: { userId: session.id },
+      where: activeOrderWhere({ userId: session.id }),
       include: { items: true },
       orderBy: { createdAt: "desc" },
     });
     return ok({ orders });
+  }
+
+  if (first === "pedidos" && second === "reciente") {
+    const session = await requireCustomer(request);
+    const id = request.nextUrl.searchParams.get("id") || undefined;
+    const token = request.nextUrl.searchParams.get("token") || undefined;
+    const order = await prisma.order.findFirst({
+      where: activeOrderWhere(session ? { userId: session.id } : id ? { id, userId: null } : { id: "__none__" }),
+      include: { items: true },
+      orderBy: { createdAt: "desc" },
+    });
+    if (!order) return ok({ order: null, canAppend: false });
+    const canAppend =
+      ["nuevo", "en_revision", "pendiente"].includes(order.estado) &&
+      Date.now() - order.createdAt.getTime() <= RECENT_ORDER_WINDOW_MS &&
+      (session ? true : Boolean(order.guestToken && token && order.guestToken === token));
+    return ok({
+      order,
+      canAppend,
+      expiresAt: new Date(order.createdAt.getTime() + RECENT_ORDER_WINDOW_MS).toISOString(),
+      serverTime: new Date().toISOString(),
+    });
   }
 
   if (first === "pedidos" && second) {
@@ -526,7 +578,7 @@ async function publicGet(request: NextRequest, segments: string[]) {
     const allowGuest = request.nextUrl.searchParams.get("guest") === "1";
     if (!session && !allowGuest) return fail("No autorizado", 401);
     const order = await prisma.order.findFirst({
-      where: { id: second, ...(session ? { userId: session.id } : { userId: null }) },
+      where: activeOrderWhere({ id: second, ...(session ? { userId: session.id } : { userId: null }) }),
       include: { items: true, historial: { orderBy: { createdAt: "asc" } } },
     });
     if (!order) return fail("Pedido no encontrado", 404);
@@ -539,7 +591,7 @@ async function publicGet(request: NextRequest, segments: string[]) {
     const allowGuest = request.nextUrl.searchParams.get("guest") === "1";
     if (!session && !admin && !allowGuest) return fail("No autorizado", 401);
     const order = await prisma.order.findFirst({
-      where: { id: second, ...(session ? { userId: session.id } : admin ? {} : { userId: null }) },
+      where: admin ? { id: second } : activeOrderWhere({ id: second, ...(session ? { userId: session.id } : { userId: null }) }),
     });
     if (!order?.pdfUrl) return fail("PDF no encontrado", 404);
     const filePath = path.join(process.cwd(), "public", order.pdfUrl.replace(/^\//, ""));
@@ -779,6 +831,102 @@ async function checkout(request: NextRequest) {
     .filter((item): item is NonNullable<typeof item> => Boolean(item));
   if (!orderItems.length) return fail("No hay productos disponibles en el pedido", 400);
 
+  if (data.appendToOrderId) {
+    const existing = await prisma.order.findFirst({
+      where: activeOrderWhere({ id: data.appendToOrderId }),
+      include: { items: { include: { product: { include: { category: true, brand: true } } } }, historial: true },
+    });
+    if (!existing) return fail("Pedido reciente no encontrado", 404);
+    if (!["nuevo", "en_revision", "pendiente"].includes(existing.estado)) return fail("Este pedido ya no admite agregados", 409);
+    if (Date.now() - existing.createdAt.getTime() > RECENT_ORDER_WINDOW_MS) return fail("La ventana de 5 minutos para agregar productos ya vencio", 409);
+    if (user) {
+      if (existing.userId !== user.id) return fail("No autorizado", 401);
+    } else if (existing.userId || !existing.guestToken || existing.guestToken !== data.guestToken) {
+      return fail("Token de pedido invitado invalido", 401);
+    }
+
+    const merged = new Map<string, {
+      existingId?: string;
+      product: typeof orderItems[number]["product"];
+      tipoPrecio: string;
+      precio: number;
+      cantidad: number;
+    }>();
+    for (const item of existing.items) {
+      const tipoPrecio = item.tipoPrecio === "caja" && item.product.precioCaja ? "caja" : "unidad";
+      const precio = tipoPrecio === "caja" && item.product.precioCaja ? item.product.precioCaja : item.product.precioUnitario;
+      merged.set(orderItemKey(item.productId, tipoPrecio), { existingId: item.id, product: item.product, tipoPrecio, precio, cantidad: item.cantidad });
+    }
+    for (const item of orderItems) {
+      const key = orderItemKey(item.product.id, item.tipoPrecio);
+      const current = merged.get(key);
+      merged.set(key, { ...item, existingId: current?.existingId, cantidad: (current?.cantidad ?? 0) + item.cantidad });
+    }
+    const mergedItems = Array.from(merged.values()).map((item) => ({ ...item, subtotal: item.precio * item.cantidad }));
+    const mergedSubtotal = mergedItems.reduce((sum, item) => sum + item.subtotal, 0);
+    const commerce = await evaluateCommerce({
+      userId: user?.id,
+      couponCode: data.couponCode || existing.cuponCodigo || undefined,
+      lines: mergedItems.map((item) => ({
+        productId: item.product.id,
+        categoryId: item.product.categoryId,
+        brandId: item.product.brandId,
+        cantidad: item.cantidad,
+        subtotal: item.subtotal,
+      })),
+    });
+
+    const addedAt = new Date();
+    const updated = await prisma.$transaction(async (tx) => {
+      for (const item of mergedItems) {
+        const payload = {
+          productId: item.product.id,
+          codigoInterno: item.product.codigoInterno,
+          nombre: item.product.nombre,
+          marca: item.product.brand?.nombre,
+          imagen: item.product.imagenPrincipal,
+          tipoPrecio: item.tipoPrecio,
+          etiqueta: item.product.etiquetaCaja,
+          precio: item.precio,
+          cantidad: item.cantidad,
+          subtotal: item.subtotal,
+        };
+        if (item.existingId) await tx.orderItem.update({ where: { id: item.existingId }, data: payload });
+        else await tx.orderItem.create({ data: { ...payload, orderId: existing.id } });
+      }
+      for (const item of orderItems) {
+        await tx.product.update({ where: { id: item.product.id }, data: { vendidos: { increment: item.cantidad } } });
+      }
+      if (commerce.coupon) {
+        const usage = await tx.couponUsage.findUnique({ where: { couponId_orderId: { couponId: commerce.coupon.id, orderId: existing.id } } }).catch(() => null);
+        if (user && !usage) await tx.couponUsage.create({ data: { couponId: commerce.coupon.id, userId: user.id, orderId: existing.id } });
+      }
+      if (serverCart) await tx.cartItem.deleteMany({ where: { cartId: serverCart.id } });
+      return tx.order.update({
+        where: { id: existing.id },
+        data: {
+          subtotal: mergedSubtotal,
+          descuento: commerce.discount,
+          cuponCodigo: commerce.coupon?.code,
+          cuponDescripcion: commerce.coupon?.description,
+          bonificaciones: JSON.stringify(commerce.bonuses),
+          total: commerce.total,
+          historial: {
+            create: {
+              estado: existing.estado,
+              nota: `Productos agregados al pedido dentro de ventana de 5 minutos. Hora: ${peruDateTime(addedAt)}`,
+              userId: user?.id,
+            },
+          },
+        },
+        include: { items: true, historial: { orderBy: { createdAt: "asc" } } },
+      });
+    });
+    const pdfUrl = await createOrderPdf(updated);
+    const finalOrder = await prisma.order.update({ where: { id: updated.id }, data: { pdfUrl }, include: { items: true, historial: { orderBy: { createdAt: "asc" } } } });
+    return ok({ success: true, data: { order: finalOrder }, order: finalOrder, appended: true });
+  }
+
   const subtotal = orderItems.reduce((sum, item) => sum + item.subtotal, 0);
   const commerce = await evaluateCommerce({
     userId: user?.id,
@@ -803,6 +951,7 @@ async function checkout(request: NextRequest) {
       data: {
         numero,
         userId: user?.id,
+        guestToken: user ? null : randomBytes(24).toString("hex"),
         clienteNombre,
         clienteApellido,
         clienteEmail: (data.email || user?.email || `pedido-${numero.toLowerCase()}@globalnorte.local`) as string,
@@ -1399,6 +1548,7 @@ async function adminPut(request: NextRequest, segments: string[]) {
   segments = normalizeSegments(segments);
   const [first, second, third] = segments;
   const body = await readJson(request);
+  const ip = getIp(request);
 
   if (first === "administradores" && second) {
     if (session.role !== "superadmin") return fail("Solo superadmin puede administrar cuentas", 403);
@@ -1581,6 +1731,7 @@ async function adminPut(request: NextRequest, segments: string[]) {
         motivoBloqueo: asString(body.motivoBloqueo),
       },
     });
+    await prisma.activityLog.create({ data: { userId: session.id, accion: user.activo && !user.bloqueado ? "activar" : "desactivar", modulo: "clientes", detalle: `${user.email} - ${asString(body.motivoBloqueo) || "Actualizacion de estado"}`, ip } });
     return ok({ user: { ...user, password: undefined } });
   }
 
@@ -1615,6 +1766,42 @@ async function adminDelete(request: NextRequest, segments: string[]) {
   if (!session) return fail("No autorizado", 401);
   segments = normalizeSegments(segments);
   const [first, second] = segments;
+  const body = (await readJson(request).catch(() => ({}))) as Data;
+  const ip = getIp(request);
+  if (first === "pedidos" && second) {
+    const order = await prisma.order.findUnique({ where: { id: second } });
+    if (!order) return fail("Pedido no encontrado", 404);
+    const reason = asString(body.motivo) || "Eliminado desde panel admin";
+    const updated = await prisma.order.update({
+      where: { id: second },
+      data: {
+        estado: "eliminado",
+        deletedAt: new Date(),
+        deletedBy: session.id,
+        deleteReason: reason,
+        historial: { create: { estado: "eliminado", nota: `Pedido eliminado/anulado. Motivo: ${reason}`, userId: session.id } },
+      },
+      include: { items: true, historial: { orderBy: { createdAt: "asc" } } },
+    });
+    await prisma.activityLog.create({ data: { userId: session.id, accion: "eliminar", modulo: "pedidos", detalle: `${order.numero} - ${reason}`, ip } });
+    return ok({ order: updated });
+  }
+  if (first === "clientes" && second) {
+    const user = await prisma.user.findUnique({ where: { id: second }, include: { orders: true } });
+    if (!user || user.rol !== "cliente") return fail("Cliente no encontrado", 404);
+    const reason = asString(body.motivo) || "Limpieza administrativa";
+    if (user.orders.length > 0) {
+      const updated = await prisma.user.update({
+        where: { id: second },
+        data: { activo: false, bloqueado: true, motivoBloqueo: reason },
+      });
+      await prisma.activityLog.create({ data: { userId: session.id, accion: "desactivar", modulo: "clientes", detalle: `${user.email} - ${reason}`, ip } });
+      return ok({ user: { ...updated, password: undefined }, mode: "deactivated" });
+    }
+    await prisma.user.delete({ where: { id: second } });
+    await prisma.activityLog.create({ data: { userId: session.id, accion: "eliminar", modulo: "clientes", detalle: `${user.email} - ${reason}`, ip } });
+    return ok({ ok: true, mode: "deleted" });
+  }
   if (first === "administradores" && second) {
     if (session.role !== "superadmin") return fail("Solo superadmin puede administrar cuentas", 403);
     const target = await prisma.adminUser.findUnique({ where: { id: second } });
@@ -1692,15 +1879,15 @@ async function dashboardReport() {
 
   const [ordersToday, salesToday, salesYesterday, products, clients, lowProducts, lastOrders, periodOrders, topItems] =
     await Promise.all([
-      prisma.order.count({ where: { createdAt: { gte: today } } }),
-      prisma.order.aggregate({ where: { createdAt: { gte: today }, estado: { not: "cancelado" } }, _sum: { total: true } }),
-      prisma.order.aggregate({ where: { createdAt: { gte: yesterday, lt: today }, estado: { not: "cancelado" } }, _sum: { total: true } }),
+      prisma.order.count({ where: activeOrderWhere({ createdAt: { gte: today } }) }),
+      prisma.order.aggregate({ where: activeOrderWhere({ createdAt: { gte: today } }), _sum: { total: true } }),
+      prisma.order.aggregate({ where: activeOrderWhere({ createdAt: { gte: yesterday, lt: today } }), _sum: { total: true } }),
       prisma.product.count({ where: { activo: true } }),
       prisma.user.count({ where: { rol: "cliente" } }),
       prisma.product.findMany({ where: { activo: true }, select: { id: true, agotado: true } }),
-      prisma.order.findMany({ include: { items: true }, orderBy: { createdAt: "desc" }, take: 10 }),
-      prisma.order.findMany({ where: { createdAt: { gte: last30 } }, include: { items: true } }),
-      prisma.orderItem.groupBy({ by: ["productId", "nombre", "codigoInterno"], _sum: { cantidad: true, subtotal: true }, orderBy: { _sum: { cantidad: "desc" } }, take: 10 }),
+      prisma.order.findMany({ where: activeOrderWhere(), include: { items: true }, orderBy: { createdAt: "desc" }, take: 10 }),
+      prisma.order.findMany({ where: activeOrderWhere({ createdAt: { gte: last30 } }), include: { items: true } }),
+      prisma.orderItem.findMany({ where: { order: activeOrderWhere() } }),
     ]);
 
   const daily = new Map<string, { fecha: string; pedidos: number; ventas: number }>();
@@ -1725,13 +1912,13 @@ async function dashboardReport() {
     lastOrders,
     charts: {
       daily: Array.from(daily.values()).sort((a, b) => a.fecha.localeCompare(b.fecha)),
-      topProducts: topItems.map((item) => ({
-        productId: item.productId,
-        codigoInterno: item.codigoInterno,
-        nombre: item.nombre,
-        cantidad: item._sum.cantidad ?? 0,
-        ingresos: item._sum.subtotal ?? 0,
-      })),
+      topProducts: Array.from(topItems.reduce((map, item) => {
+        const current = map.get(item.productId) ?? { productId: item.productId, codigoInterno: item.codigoInterno, nombre: item.nombre, cantidad: 0, ingresos: 0 };
+        current.cantidad += item.cantidad;
+        current.ingresos += item.subtotal;
+        map.set(item.productId, current);
+        return map;
+      }, new Map<string, { productId: string; codigoInterno: string; nombre: string; cantidad: number; ingresos: number }>()).values()).sort((a, b) => b.cantidad - a.cantidad).slice(0, 10),
     },
   };
 }
@@ -1746,14 +1933,31 @@ function orderDateFilter(search: URLSearchParams) {
     from = new Date(now); from.setHours(0, 0, 0, 0);
     to = new Date(now); to.setHours(23, 59, 59, 999);
   }
+  if (period === "ayer") {
+    from = new Date(now); from.setDate(now.getDate() - 1); from.setHours(0, 0, 0, 0);
+    to = new Date(from); to.setHours(23, 59, 59, 999);
+  }
   if (period === "semana") {
     from = new Date(now); from.setDate(now.getDate() - 6); from.setHours(0, 0, 0, 0);
     to = new Date(now); to.setHours(23, 59, 59, 999);
+  }
+  if (period === "mes") {
+    from = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
+    to = new Date(now); to.setHours(23, 59, 59, 999);
+  }
+  if (period === "todos") {
+    from = undefined;
+    to = undefined;
   }
   if (month && /^\d{4}-\d{2}$/.test(month)) {
     const [year, monthNumber] = month.split("-").map(Number);
     from = new Date(year, monthNumber - 1, 1, 0, 0, 0, 0);
     to = new Date(year, monthNumber, 0, 23, 59, 59, 999);
+  }
+  const singleDate = search.get("fecha");
+  if (singleDate) {
+    from = new Date(`${singleDate}T00:00:00`);
+    to = new Date(`${singleDate}T23:59:59`);
   }
   const fromText = search.get("desde");
   const toText = search.get("hasta");
@@ -1769,10 +1973,12 @@ function orderDateFilter(search: URLSearchParams) {
 async function consolidatedReport(request: NextRequest, format?: string) {
   const search = request.nextUrl.searchParams;
   const dates = orderDateFilter(search);
+  const estado = search.get("estado");
   const orders = await prisma.order.findMany({
     where: {
+      deletedAt: null,
       ...(dates.filter ? { createdAt: dates.filter } : {}),
-      ...(search.get("estado") ? { estado: search.get("estado") as string } : { estado: { not: "cancelado" } }),
+      ...(estado ? { estado } : { estado: { notIn: HIDDEN_ORDER_STATES } }),
       ...(search.get("clienteId") ? { userId: search.get("clienteId") as string } : {}),
     },
     include: { items: { include: { product: { include: { category: true, brand: true } } } } },
@@ -1818,9 +2024,15 @@ async function adminOrders(request: NextRequest) {
   const search = request.nextUrl.searchParams;
   const where: Prisma.OrderWhereInput = {};
   const estado = search.get("estado");
+  const showDeleted = search.get("eliminados") === "1";
   const metodoPago = search.get("metodoPago");
   const q = search.get("q")?.trim();
   if (estado) where.estado = estado;
+  if (showDeleted) where.AND = [{ OR: [{ deletedAt: { not: null } }, { estado: "eliminado" }] }];
+  else {
+    where.deletedAt = null;
+    if (!estado) where.estado = { notIn: HIDDEN_ORDER_STATES };
+  }
   if (metodoPago) where.metodoPago = metodoPago;
   const dates = orderDateFilter(search);
   if (dates.filter) where.createdAt = dates.filter;
@@ -1830,11 +2042,16 @@ async function adminOrders(request: NextRequest) {
   if (!Number.isNaN(totalMin) || !Number.isNaN(totalMax)) where.total = { ...(Number.isNaN(totalMin) ? {} : { gte: totalMin }), ...(Number.isNaN(totalMax) ? {} : { lte: totalMax }) };
   if (search.get("clienteId")) where.userId = search.get("clienteId") as string;
   if (q) {
-    where.OR = [
-      { numero: { contains: q } },
-      { clienteNombre: { contains: q } },
-      { clienteApellido: { contains: q } },
-      { clienteTelefono: { contains: q } },
+    where.AND = [
+      ...((Array.isArray(where.AND) ? where.AND : where.AND ? [where.AND] : []) as Prisma.OrderWhereInput[]),
+      {
+        OR: [
+          { numero: { contains: q } },
+          { clienteNombre: { contains: q } },
+          { clienteApellido: { contains: q } },
+          { clienteTelefono: { contains: q } },
+        ],
+      },
     ];
   }
   const [orders, total, sum] = await Promise.all([
@@ -1899,9 +2116,11 @@ async function exportProducts() {
 
 async function adminCustomers(request: NextRequest) {
   const q = request.nextUrl.searchParams.get("q")?.trim();
+  const showInactive = request.nextUrl.searchParams.get("desactivados") === "1";
   const users = await prisma.user.findMany({
     where: {
       rol: "cliente",
+      ...(showInactive ? { OR: [{ activo: false }, { bloqueado: true }] } : { activo: true, bloqueado: false }),
       ...(q
         ? {
             OR: [
@@ -1914,7 +2133,7 @@ async function adminCustomers(request: NextRequest) {
           }
         : {}),
     },
-    include: { orders: true },
+    include: { orders: { where: { deletedAt: null, estado: { notIn: HIDDEN_ORDER_STATES } } } },
     orderBy: { createdAt: "desc" },
     take: 100,
   });
@@ -1922,7 +2141,7 @@ async function adminCustomers(request: NextRequest) {
 }
 
 async function customerDetail(id: string) {
-  const user = await prisma.user.findUnique({ where: { id }, include: { orders: { include: { items: true }, orderBy: { createdAt: "desc" } }, addresses: true, benefit: true } });
+  const user = await prisma.user.findUnique({ where: { id }, include: { orders: { where: { deletedAt: null, estado: { notIn: HIDDEN_ORDER_STATES } }, include: { items: true }, orderBy: { createdAt: "desc" } }, addresses: true, benefit: true } });
   if (!user) return fail("Cliente no encontrado", 404);
   return ok({ user: { ...user, password: undefined, totalComprado: user.orders.reduce((sum, order) => sum + order.total, 0) } });
 }
@@ -1934,7 +2153,7 @@ async function reports(kind: string, request: NextRequest) {
   from.setDate(from.getDate() - days);
 
   if (kind === "ventas") {
-    const orders = await prisma.order.findMany({ where: { createdAt: { gte: from }, estado: { not: "cancelado" } }, orderBy: { createdAt: "asc" } });
+    const orders = await prisma.order.findMany({ where: activeOrderWhere({ createdAt: { gte: from } }), orderBy: { createdAt: "asc" } });
     const daily = new Map<string, { fecha: string; pedidos: number; ventas: number }>();
     for (const order of orders) {
       const key = order.createdAt.toISOString().slice(0, 10);
@@ -1947,12 +2166,19 @@ async function reports(kind: string, request: NextRequest) {
   }
 
   if (kind === "productos") {
-    const top = await prisma.orderItem.groupBy({ by: ["productId", "codigoInterno", "nombre"], _sum: { cantidad: true, subtotal: true }, orderBy: { _sum: { cantidad: "desc" } }, take: 20 });
-    return ok({ rows: top.map((item) => ({ productId: item.productId, codigoInterno: item.codigoInterno, nombre: item.nombre, unidades: item._sum.cantidad ?? 0, ingresos: item._sum.subtotal ?? 0 })) });
+    const items = await prisma.orderItem.findMany({ where: { order: activeOrderWhere() } });
+    const grouped = new Map<string, { productId: string; codigoInterno: string; nombre: string; unidades: number; ingresos: number }>();
+    for (const item of items) {
+      const current = grouped.get(item.productId) ?? { productId: item.productId, codigoInterno: item.codigoInterno, nombre: item.nombre, unidades: 0, ingresos: 0 };
+      current.unidades += item.cantidad;
+      current.ingresos += item.subtotal;
+      grouped.set(item.productId, current);
+    }
+    return ok({ rows: Array.from(grouped.values()).sort((a, b) => b.unidades - a.unidades).slice(0, 20) });
   }
 
   if (kind === "categorias") {
-    const items = await prisma.orderItem.findMany({ include: { product: { include: { category: true } } } });
+    const items = await prisma.orderItem.findMany({ where: { order: activeOrderWhere() }, include: { product: { include: { category: true } } } });
     const grouped = new Map<string, { categoria: string; ingresos: number; unidades: number }>();
     for (const item of items) {
       const key = item.product.category.nombre;
@@ -1965,7 +2191,7 @@ async function reports(kind: string, request: NextRequest) {
   }
 
   if (kind === "clientes") {
-    const users = await prisma.user.findMany({ where: { rol: "cliente" }, include: { orders: true } });
+    const users = await prisma.user.findMany({ where: { rol: "cliente" }, include: { orders: { where: { deletedAt: null, estado: { notIn: HIDDEN_ORDER_STATES } } } } });
     return ok({ rows: users.map((user) => ({ id: user.id, cliente: `${user.nombre} ${user.apellido}`, pedidos: user.orders.length, total: user.orders.reduce((sum, order) => sum + order.total, 0) })).sort((a, b) => b.total - a.total).slice(0, 10) });
   }
 

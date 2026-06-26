@@ -90,6 +90,7 @@ type Order = {
   bonificaciones?: string;
   entregaMapsUrl?: string | null;
   pdfUrl?: string | null;
+  guestToken?: string | null;
   createdAt: string;
   items: Array<{ id: string; codigoInterno: string; nombre: string; cantidad: number; precio: number; subtotal: number }>;
 };
@@ -1103,6 +1104,7 @@ function CartView({ cart, total, user, banners, message, onUpdate, onRemove, onC
   const [couponCode, setCouponCode] = useState("");
   const [benefit, setBenefit] = useState<CommerceBenefit | null>(null);
   const [applying, setApplying] = useState(false);
+  const [recentHint, setRecentHint] = useState<Order | null>(null);
   const cartKey = cart?.items.map((item) => `${item.product.id}:${item.cantidad}:${item.tipoPrecio}`).join("|") ?? "";
   const validate = useCallback(async (code: string, silent = false) => {
     if (!cart?.items.length) return;
@@ -1116,6 +1118,12 @@ function CartView({ cart, total, user, banners, message, onUpdate, onRemove, onC
     finally { setApplying(false); }
   }, [cart]);
   useEffect(() => { const saved = window.localStorage.getItem(COUPON_STORAGE_KEY) || ""; setCouponCode(saved); if (cartKey) validate(saved, true); }, [cartKey, validate]);
+  useEffect(() => {
+    try {
+      const cached = JSON.parse(window.sessionStorage.getItem(LAST_ORDER_STORAGE_KEY) || "null") as Order | null;
+      if (cached && Date.now() - new Date(cached.createdAt).getTime() <= 5 * 60 * 1000) setRecentHint(cached);
+    } catch {}
+  }, []);
   if (!cart?.items.length) return <EmptyState title="Carrito vacio" action="/catalogo" actionLabel="Ver catalogo" icon={<ShoppingCart className="h-8 w-8" />} />;
   const campaign = banners.find((banner) => banner.tipo === "carrito");
   return (<>
@@ -1145,6 +1153,7 @@ function CartView({ cart, total, user, banners, message, onUpdate, onRemove, onC
       </div>
       <aside className="h-fit rounded border border-neutral-200 bg-white p-5">
         <p className="text-sm font-bold uppercase tracking-wide text-neutral-500">Resumen del pedido</p>
+        {recentHint ? <p className="mt-3 rounded border border-red-100 bg-[#FFF5F5] p-3 text-xs font-bold text-neutral-700">Tienes un pedido reciente ({recentHint.numero}). Puedes agregar estos productos a tu pedido anterior en checkout.</p> : null}
         <div className="mt-4 flex justify-between text-sm"><span>Subtotal</span><strong>{money(total)}</strong></div>
         <div className="mt-2 flex justify-between text-sm"><span>Descuento</span><strong>-{money(benefit?.discount ?? 0)}</strong></div>
         {benefit?.coupon ? <p className="mt-2 text-xs font-bold text-green-700">Cupon {benefit.coupon.code}: {benefit.coupon.description}</p> : null}
@@ -1167,23 +1176,46 @@ function CheckoutView({ cart, total, user, authReady, message, onClear }: { cart
   const [submitting, setSubmitting] = useState(false);
   const [couponCode, setCouponCode] = useState("");
   const [benefit, setBenefit] = useState<CommerceBenefit | null>(null);
+  const [recent, setRecent] = useState<{ order: Order; expiresAt?: string } | null>(null);
+  const [appendToRecent, setAppendToRecent] = useState(false);
   useEffect(() => {
     if (!cart?.items.length) return;
     const code = window.localStorage.getItem(COUPON_STORAGE_KEY) || "";
     setCouponCode(code);
     api<{ benefit: CommerceBenefit }>("/api/cupones/validar", { method: "POST", body: JSON.stringify({ couponCode: code, items: cart.items.map((item) => ({ productId: item.product.id, cantidad: item.cantidad, tipoPrecio: item.tipoPrecio })) }) }).then((data) => setBenefit(data.benefit)).catch(() => setBenefit(null));
   }, [cart]);
+  useEffect(() => {
+    let active = true;
+    async function loadRecent() {
+      try {
+        const cached = JSON.parse(window.sessionStorage.getItem(LAST_ORDER_STORAGE_KEY) || "null") as Order | null;
+        const params = new URLSearchParams();
+        if (!user && cached?.id) params.set("id", cached.id);
+        if (!user && cached?.guestToken) params.set("token", cached.guestToken);
+        const data = await api<{ order: Order | null; canAppend: boolean; expiresAt?: string }>(`/api/pedidos/reciente${params.toString() ? `?${params}` : ""}`);
+        if (active && data.canAppend && data.order) setRecent({ order: data.order, expiresAt: data.expiresAt });
+      } catch {
+        if (active) setRecent(null);
+      }
+    }
+    if (cart?.items.length) loadRecent();
+    return () => { active = false; };
+  }, [cart?.items.length, user]);
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setSubmitting(true);
+    const cached = (() => {
+      try { return JSON.parse(window.sessionStorage.getItem(LAST_ORDER_STORAGE_KEY) || "null") as Order | null; } catch { return null; }
+    })();
     const payload = {
       ...formData(event),
       couponCode,
+      ...(appendToRecent && recent?.order ? { appendToOrderId: recent.order.id, guestToken: user ? undefined : cached?.guestToken } : {}),
       items: cart?.items.map((item): CartPayloadItem => ({ productId: item.product.id, cantidad: item.cantidad, tipoPrecio: item.tipoPrecio })) ?? [],
     };
     try {
       const data = await api<{ order: Order; waLink?: string }>("/api/orders", { method: "POST", body: JSON.stringify(payload) });
-      toast.success("Pedido registrado. Un asesor confirmara disponibilidad y entrega.");
+      toast.success(data.order.id === recent?.order.id ? "Productos agregados al pedido reciente." : "Pedido registrado. Un asesor confirmara disponibilidad y entrega.");
       window.sessionStorage.setItem(LAST_ORDER_STORAGE_KEY, JSON.stringify(data.order));
       onClear();
       window.localStorage.removeItem(COUPON_STORAGE_KEY);
@@ -1202,6 +1234,15 @@ function CheckoutView({ cart, total, user, authReady, message, onClear }: { cart
       <form onSubmit={submit} className="rounded border border-neutral-200 bg-white p-5">
         <h1 className="mb-5 text-2xl font-extrabold text-neutral-950">Registrar pedido</h1>
         {!user ? <p className="mb-4 rounded border border-neutral-200 bg-neutral-50 p-3 text-sm font-bold text-neutral-700">Continuar como invitado. Guardaremos el pedido como Cliente Invitado.</p> : null}
+        {recent ? (
+          <div className="mb-4 rounded border border-red-100 bg-[#FFF5F5] p-3 text-sm font-semibold text-neutral-700">
+            <p>Tienes un pedido reciente ({recent.order.numero}). Puedes agregar estos productos a tu pedido anterior hasta {recent.expiresAt ? new Date(recent.expiresAt).toLocaleTimeString("es-PE", { hour: "2-digit", minute: "2-digit" }) : "los proximos minutos"}.</p>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <button type="button" onClick={() => setAppendToRecent(true)} className={`rounded border px-3 py-2 text-xs font-black ${appendToRecent ? "border-[#D32F2F] bg-white text-[#D32F2F]" : "border-neutral-300 bg-white"}`}>Agregar al pedido reciente</button>
+              <button type="button" onClick={() => setAppendToRecent(false)} className={`rounded border px-3 py-2 text-xs font-black ${!appendToRecent ? "border-[#D32F2F] bg-white text-[#D32F2F]" : "border-neutral-300 bg-white"}`}>Crear nuevo pedido</button>
+            </div>
+          </div>
+        ) : null}
         <p className="mb-4 rounded bg-[#FFF5F5] p-3 text-sm font-semibold text-neutral-700">{message || "El pedido sera revisado y coordinado por WhatsApp."}</p>
         <div className="grid gap-3 md:grid-cols-2">
           <TextInput name="nombreNegocio" label="Nombre del negocio" defaultValue={user?.nombreNegocio ?? ""} />
@@ -1238,7 +1279,7 @@ function CheckoutView({ cart, total, user, authReady, message, onClear }: { cart
           <CaptchaField />
         </div>
         <button disabled={submitting} className="mt-5 h-11 rounded bg-[#D32F2F] px-5 text-sm font-bold text-white hover:bg-[#B71C1C] disabled:opacity-60">
-          {submitting ? "Registrando pedido" : "Registrar pedido"}
+          {submitting ? "Registrando pedido" : appendToRecent && recent ? "Agregar al pedido reciente" : "Registrar pedido"}
         </button>
       </form>
       <aside className="h-fit rounded border border-neutral-200 bg-white p-5">

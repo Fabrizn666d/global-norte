@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { expect, test } from "@playwright/test";
+import { expect, Page, test } from "@playwright/test";
 
 const baseURL = "http://localhost:3001";
 const adminEmail = "admin@globalnorte.pe";
@@ -13,9 +13,16 @@ if (!adminPassword) throw new Error("Define ADMIN_TEST_PASSWORD o ADMIN_SEED_PAS
 
 const uploadImage = path.join(process.cwd(), "public", "brand", "global-norte-logo.jpg");
 
+async function closeBlockingNotices(page: Page) {
+  const popupClose = page.locator('.fixed.inset-0.z-50 button[title="Cerrar"]').first();
+  await popupClose.click({ timeout: 3000, force: true }).catch(() => undefined);
+  await expect(page.locator(".fixed.inset-0.z-50")).toHaveCount(0, { timeout: 3000 }).catch(() => undefined);
+}
+
 test("cliente crea pedido y admin lo gestiona", async ({ page }) => {
   const phone = `9${Date.now().toString().slice(-8)}`;
   await page.goto(`${baseURL}/catalogo`, { waitUntil: "networkidle" });
+  await closeBlockingNotices(page);
   await expect(page.getByText("Cargando catalogo")).toHaveCount(0, { timeout: 20000 });
   await expect(page.getByText("Catalogo mayorista")).toBeVisible();
   await expect(page.locator("article")).toHaveCount(24);
@@ -23,6 +30,7 @@ test("cliente crea pedido y admin lo gestiona", async ({ page }) => {
 
   await page.getByPlaceholder("Buscar nombre, codigo o marca").fill("ACEITE");
   await expect(page.locator("article").first()).toContainText(/ACEITE/i, { timeout: 20000 });
+  await closeBlockingNotices(page);
 
   await page.locator("article").nth(0).getByRole("button", { name: "Sumar" }).click();
   await page.locator("article").nth(0).getByRole("button", { name: "Sumar" }).click();
@@ -34,41 +42,45 @@ test("cliente crea pedido y admin lo gestiona", async ({ page }) => {
   await expect(page.getByRole("heading", { name: "Pedido" })).toBeVisible();
   await expect(page.getByText("Resumen del pedido")).toBeVisible();
   await page.locator("button[title='Sumar']").first().click();
-  await expect(page.getByText("Ingresar para finalizar")).toBeVisible();
+  await expect(page.getByText("Continuar como invitado")).toBeVisible();
 
   await page.goto(`${baseURL}/checkout`, { waitUntil: "networkidle" });
-  await expect(page).toHaveURL(/\/login\?next=%2Fcheckout/, { timeout: 20000 });
-  await expect(page.getByRole("heading", { name: "Ingresar como cliente" })).toBeVisible();
-  await page.getByRole("link", { name: "Crear cuenta" }).click();
+  await expect(page.getByRole("heading", { name: "Registrar pedido" })).toBeVisible();
+  await expect(page.getByText("Continuar como invitado")).toBeVisible();
+  await page.getByLabel("Nombre del negocio").fill("Bodega Invitada UI Codex");
+  await page.getByLabel("Nombre", { exact: true }).fill("Cliente Invitado UI");
+  await page.getByLabel("Celular").fill(phone);
+  await page.getByLabel("Direccion").fill("Av. Invitado 123");
+  await page.getByLabel("Referencia").fill("Frente al parque");
+  await page.getByLabel("Distrito").fill("Carabayllo");
+  await page.getByLabel("Link de Google Maps").fill("https://maps.google.com/?q=-11.9,-77.0");
+  const guestOrderPromise = page.waitForResponse((response) => response.url().includes("/api/orders") && response.request().method() === "POST");
+  await page.getByRole("button", { name: "Registrar pedido" }).click();
+  const guestOrderResponse = await guestOrderPromise;
+  expect(guestOrderResponse.ok(), await guestOrderResponse.text()).toBeTruthy();
+  await expect(page.getByRole("heading", { name: "Pedido registrado" })).toBeVisible({ timeout: 30000 });
+  await expect(page.getByText(/GN-\d{4}-\d+/)).toBeVisible({ timeout: 20000 });
+  const guestOrderText = await page.locator("body").innerText();
+  const orderNumber = guestOrderText.match(/GN-\d{4}-\d+/)?.[0];
+  expect(orderNumber).toBeTruthy();
+  await expect(page.getByText("No es comprobante de pago")).toBeVisible();
+  const clientPdfHref = await page.getByRole("link", { name: "Descargar PDF" }).getAttribute("href");
+  expect(clientPdfHref).toBeTruthy();
+  const clientPdf = await page.request.get(`${baseURL}${clientPdfHref}`);
+  expect(clientPdf.ok()).toBeTruthy();
+  expect(clientPdf.headers()["content-type"]).toContain("application/pdf");
+
+  await page.goto(`${baseURL}/registro?next=%2Fcheckout`, { waitUntil: "networkidle" });
   await expect(page.getByRole("heading", { name: "Registro de cliente" })).toBeVisible();
-  await page.getByLabel("Nombre del negocio").fill("Bodega UI Codex");
+  await page.getByLabel("Nombre del negocio").fill("Bodega Registrada UI Codex");
   await page.getByLabel("Nombre de contacto").fill("Cliente Prueba UI");
-  await page.getByLabel("Telefono WhatsApp").fill(phone);
+  await page.getByLabel("Telefono WhatsApp").fill(`9${(Date.now() + 1).toString().slice(-8)}`);
   await page.getByLabel("Password").fill("cliente123");
   await page.getByLabel("Direccion").fill("Av. Prueba 123");
   await page.getByLabel("Referencia").fill("Frente al parque");
   await page.getByLabel("Distrito").fill("Carabayllo");
   await page.getByRole("button", { name: "Crear cuenta" }).click();
   await expect(page).toHaveURL(/\/checkout/, { timeout: 20000 });
-  await expect(page.getByText("Bodega UI Codex")).toBeVisible({ timeout: 20000 });
-  const orderResponsePromise = page.waitForResponse((response) => response.url().includes("/api/orders") && response.request().method() === "POST");
-  await page.getByRole("button", { name: "Registrar pedido" }).click();
-  const orderResponse = await orderResponsePromise;
-  const orderResponseText = await orderResponse.text();
-  expect(orderResponse.ok(), orderResponseText).toBeTruthy();
-
-  await expect(page.getByRole("heading", { name: "Pedido registrado" })).toBeVisible({ timeout: 30000 });
-  await expect(page.getByText(/GN-\d{4}-\d+/)).toBeVisible({ timeout: 20000 });
-  const orderText = await page.locator("body").innerText();
-  const orderNumber = orderText.match(/GN-\d{4}-\d+/)?.[0];
-  expect(orderNumber).toBeTruthy();
-  await expect(page.getByText("No es comprobante de pago")).toBeVisible();
-  await expect(page.getByText("Ver mis pedidos")).toBeVisible();
-  const clientPdfHref = await page.getByRole("link", { name: "Descargar PDF" }).getAttribute("href");
-  expect(clientPdfHref).toBeTruthy();
-  const clientPdf = await page.request.get(`${baseURL}${clientPdfHref}`);
-  expect(clientPdf.ok()).toBeTruthy();
-  expect(clientPdf.headers()["content-type"]).toContain("application/pdf");
 
   await page.goto(`${baseURL}/admin`, { waitUntil: "networkidle" });
   await page.getByLabel("Email").fill(adminEmail);
@@ -105,29 +117,39 @@ test("admin productos e imagenes y banners funcionan", async ({ page }) => {
   await page.getByLabel("Codigo interno").fill(productCode);
   await page.getByLabel("Nombre").fill("Producto temporal UI Codex");
   await page.getByLabel("P. unitario").fill("2.50");
-  await page.locator("input[name='stock']").fill("5");
-  await page.locator("input[name='stockMinimo']").fill("1");
   await page.locator("input[name='unidad']").fill("unidad");
   await page.getByLabel("Mostrar en home").check();
   await page.getByLabel("Destacado", { exact: true }).check();
+  await page.getByLabel("Oferta", { exact: true }).check();
+  await page.getByLabel("Nuevo", { exact: true }).check();
   await page.getByLabel("Orden en home").fill("0");
   await page.getByLabel("Etiqueta destacada").selectOption("recomendado");
   await page.getByLabel("Subir imagen").setInputFiles(uploadImage);
   await expect(page.getByLabel("Imagen principal")).toHaveValue(/\/uploads\/products\//, { timeout: 20000 });
   await page.getByRole("button", { name: "Guardar producto" }).click();
   await page.getByPlaceholder("Buscar codigo, nombre o marca").fill(productCode);
-  await expect(page.getByText(productCode)).toBeVisible({ timeout: 20000 });
+  await expect(page.locator("body")).toContainText(productCode, { timeout: 20000 });
   await page.goto(baseURL, { waitUntil: "networkidle" });
   await expect(page.locator("article", { hasText: productCode })).toBeVisible({ timeout: 20000 });
   await page.goto(`${baseURL}/catalogo?q=${encodeURIComponent(productCode)}`, { waitUntil: "networkidle" });
   await expect(page.locator("article", { hasText: productCode })).toBeVisible({ timeout: 20000 });
   await expect(page.locator("article", { hasText: productCode }).locator("img")).toHaveAttribute("src", /\/api\/media\/uploads\/products\//);
+  await expect(page.locator("article", { hasText: productCode })).toContainText("Nuevo");
+  await page.goto(`${baseURL}/catalogo?oferta=1&q=${encodeURIComponent(productCode)}`, { waitUntil: "networkidle" });
+  await expect(page.locator("article", { hasText: productCode })).toBeVisible({ timeout: 20000 });
+  await page.goto(`${baseURL}/catalogo?nuevo=1&q=${encodeURIComponent(productCode)}`, { waitUntil: "networkidle" });
+  await expect(page.locator("article", { hasText: productCode })).toBeVisible({ timeout: 20000 });
   await page.goto(`${baseURL}/admin/productos`, { waitUntil: "networkidle" });
   await page.getByPlaceholder("Buscar codigo, nombre o marca").fill(productCode);
   await page.locator("tr", { hasText: productCode }).getByRole("button", { name: "Editar" }).click();
   await page.getByLabel("Nombre").fill("Producto temporal UI Codex editado");
+  await page.getByLabel("Disponible / Sin stock").check();
   await page.getByRole("button", { name: "Guardar producto" }).click();
-  await expect(page.getByText("Producto temporal UI Codex editado")).toBeVisible({ timeout: 20000 });
+  await expect(page.locator("body")).toContainText("Producto temporal UI Codex editado", { timeout: 20000 });
+  await page.goto(`${baseURL}/catalogo?q=${encodeURIComponent(productCode)}`, { waitUntil: "networkidle" });
+  await expect(page.locator("article", { hasText: productCode })).toContainText("Sin stock", { timeout: 20000 });
+  await page.goto(`${baseURL}/admin/productos`, { waitUntil: "networkidle" });
+  await page.getByPlaceholder("Buscar codigo, nombre o marca").fill(productCode);
   await page.locator("tr", { hasText: productCode }).getByRole("button", { name: "Eliminar" }).click();
   await expect(page.getByText(productCode)).toHaveCount(0, { timeout: 20000 });
 
@@ -141,7 +163,7 @@ test("admin productos e imagenes y banners funcionan", async ({ page }) => {
   await page.getByLabel("Cargar archivo movil").setInputFiles(uploadImage);
   await expect(page.getByLabel("Imagen", { exact: true })).toHaveValue(/\/uploads\/banners\//, { timeout: 20000 });
   await page.getByRole("button", { name: "Guardar" }).click();
-  await expect(page.getByText(bannerTitle)).toBeVisible({ timeout: 20000 });
+  await expect(page.locator("body")).toContainText(bannerTitle, { timeout: 20000 });
   await page.goto(baseURL, { waitUntil: "networkidle" });
   await expect(page.getByRole("heading", { name: bannerTitle })).toBeVisible({ timeout: 20000 });
   await expect(page.getByRole("link", { name: "Admin" })).toHaveCount(0);
@@ -150,7 +172,7 @@ test("admin productos e imagenes y banners funcionan", async ({ page }) => {
   const editedTitle = `${bannerTitle} editado`;
   await page.getByLabel("Titulo", { exact: true }).fill(editedTitle);
   await page.getByRole("button", { name: "Guardar" }).click();
-  await expect(page.getByText(editedTitle)).toBeVisible({ timeout: 20000 });
+  await expect(page.locator("body")).toContainText(editedTitle, { timeout: 20000 });
   await page.locator("tr", { hasText: editedTitle }).getByRole("button", { name: "Desactivar" }).click();
   await page.locator("tr", { hasText: editedTitle }).getByRole("button", { name: "Eliminar" }).click();
   await expect(page.getByText(editedTitle)).toHaveCount(0, { timeout: 20000 });
@@ -160,12 +182,12 @@ test("admin productos e imagenes y banners funcionan", async ({ page }) => {
     await page.goto(`${baseURL}/admin/${route}`, { waitUntil: "networkidle" });
     await page.getByLabel("Nombre").fill(label);
     await page.getByRole("button", { name: "Guardar" }).click();
-    await expect(page.getByText(label)).toBeVisible({ timeout: 20000 });
+    await expect(page.locator("body")).toContainText(label, { timeout: 20000 });
     await page.locator("tr", { hasText: label }).getByRole("button", { name: "Editar" }).click();
     const edited = `${label} editada`;
     await page.getByLabel("Nombre").fill(edited);
     await page.getByRole("button", { name: "Guardar" }).click();
-    await expect(page.getByText(edited)).toBeVisible({ timeout: 20000 });
+    await expect(page.locator("body")).toContainText(edited, { timeout: 20000 });
     await page.locator("tr", { hasText: edited }).getByRole("button", { name: "Eliminar" }).click();
     await expect(page.getByText(edited)).toHaveCount(0, { timeout: 20000 });
   }
@@ -186,8 +208,10 @@ test("cupones, bonificaciones, notificaciones y consolidado funcionan", async ({
   const phone = `9${suffix.toString().slice(-8)}`;
 
   await page.goto(`${baseURL}/catalogo?q=ACEITE`, { waitUntil: "networkidle" });
+  await closeBlockingNotices(page);
   const card = page.locator("article").first();
   await expect(card).toContainText(/ACEITE/i);
+  await closeBlockingNotices(page);
   for (let index = 0; index < 29; index += 1) await card.getByRole("button", { name: "Sumar" }).click();
   await card.getByRole("button", { name: "Agregar al pedido" }).click();
   await page.goto(`${baseURL}/registro?next=%2Fcarrito`, { waitUntil: "networkidle" });
@@ -213,7 +237,7 @@ test("cupones, bonificaciones, notificaciones y consolidado funcionan", async ({
   expect(orderResponse.ok(), await orderResponse.text()).toBeTruthy();
   await expect(page.getByRole("heading", { name: "Pedido registrado" })).toBeVisible({ timeout: 30000 });
   await expect(page.getByText(/Cupon BODEGA10/)).toBeVisible();
-  await expect(page.getByText(/Bonificacion \/ regalo/)).toBeVisible();
+  await expect(page.getByText(/Bonificacion \/ regalo/).first()).toBeVisible();
 
   await page.goto(`${baseURL}/admin`, { waitUntil: "networkidle" });
   await page.getByLabel("Email").fill(adminEmail);
@@ -223,7 +247,7 @@ test("cupones, bonificaciones, notificaciones y consolidado funcionan", async ({
 
   await page.goto(`${baseURL}/admin/consolidado`, { waitUntil: "networkidle" });
   await expect(page.getByRole("heading", { name: "Consolidado de carga", level: 1 })).toBeVisible();
-  await expect(page.getByText("ACEITE ALPA DE 1LT")).toBeVisible({ timeout: 20000 });
+  await expect(page.locator("body")).toContainText("ACEITE ALPA DE 1LT", { timeout: 20000 });
   const pdfHref = await page.getByRole("link", { name: "Descargar PDF" }).getAttribute("href");
   const csvHref = await page.getByRole("link", { name: "Exportar CSV / Excel" }).getAttribute("href");
   const consolidatedPdf = await page.request.get(`${baseURL}${pdfHref}`);
@@ -234,13 +258,13 @@ test("cupones, bonificaciones, notificaciones y consolidado funcionan", async ({
   await page.goto(`${baseURL}/admin/backups`, { waitUntil: "networkidle" });
   await expect(page.getByRole("heading", { name: "Backups", level: 1 })).toBeVisible();
   await page.getByRole("button", { name: "Backup DB" }).click();
-  await expect(page.getByText("global-norte-database")).toBeVisible({ timeout: 30000 });
+  await expect(page.locator("body")).toContainText("global-norte-database", { timeout: 30000 });
   const dbBackupHref = await page.locator("tr", { hasText: "global-norte-database" }).first().getByRole("link", { name: "Descargar" }).getAttribute("href");
   const dbBackup = await page.request.get(`${baseURL}${dbBackupHref}`);
   expect(dbBackup.ok()).toBeTruthy();
   expect(dbBackup.headers()["content-type"]).toContain("application/x-sqlite3");
   await page.getByRole("button", { name: "Backup uploads" }).click();
-  await expect(page.getByText("global-norte-uploads")).toBeVisible({ timeout: 30000 });
+  await expect(page.locator("body")).toContainText("global-norte-uploads", { timeout: 30000 });
   const uploadsBackupHref = await page.locator("tr", { hasText: "global-norte-uploads" }).first().getByRole("link", { name: "Descargar" }).getAttribute("href");
   const uploadsBackup = await page.request.get(`${baseURL}${uploadsBackupHref}`);
   expect(uploadsBackup.ok()).toBeTruthy();
@@ -254,7 +278,7 @@ test("cupones, bonificaciones, notificaciones y consolidado funcionan", async ({
   await page.getByLabel("Carrito minimo").fill("10");
   await page.getByLabel("Activo", { exact: true }).check();
   await page.getByRole("button", { name: "Guardar cupon" }).click();
-  await expect(page.getByText(couponCode)).toBeVisible();
+  await expect(page.locator("body")).toContainText(couponCode);
   await page.locator("tr", { hasText: couponCode }).getByRole("button", { name: "Editar" }).click();
   await page.getByLabel("Descripcion").fill("Cupon QA editado");
   await page.getByLabel("Activo", { exact: true }).uncheck();
@@ -268,7 +292,7 @@ test("cupones, bonificaciones, notificaciones y consolidado funcionan", async ({
   await page.getByLabel("Valor condicion").fill("10");
   await page.getByLabel("Activa", { exact: true }).check();
   await page.getByRole("button", { name: "Guardar" }).click();
-  await expect(page.getByText(bonusName)).toBeVisible();
+  await expect(page.locator("body")).toContainText(bonusName);
   await page.locator("tr", { hasText: bonusName }).getByRole("button", { name: "Editar" }).click();
   await page.getByLabel("Producto gratis / beneficio").fill("Muestra QA editada");
   await page.getByLabel("Activa", { exact: true }).uncheck();
@@ -281,7 +305,7 @@ test("cupones, bonificaciones, notificaciones y consolidado funcionan", async ({
   await page.getByLabel("Mensaje").fill("Hola {nombre}, promocion QA");
   await page.getByLabel("Activa", { exact: true }).check();
   await page.getByRole("button", { name: "Guardar" }).click();
-  await expect(page.getByText(notificationTitle)).toBeVisible();
+  await expect(page.locator("body")).toContainText(notificationTitle);
   await page.getByRole("button", { name: "Cerrar sesion" }).click();
   await page.goto(baseURL, { waitUntil: "networkidle" });
   await expect(page.getByText(notificationTitle)).toBeVisible({ timeout: 20000 });

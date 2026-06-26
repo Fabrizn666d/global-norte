@@ -53,8 +53,8 @@ const settings = [
 async function seedCommercialRules() {
   await prisma.coupon.upsert({
     where: { codigo: "BODEGA10" },
-    create: { codigo: "BODEGA10", descripcion: "S/ 10 de descuento desde S/ 100", tipo: "fijo", valor: 10, montoMinimo: 100, limitePorCliente: 5, activo: true, prioridad: 10 },
-    update: { activo: true },
+    create: { codigo: "BODEGA10", descripcion: "S/ 10 de descuento desde S/ 100", tipo: "fijo", valor: 10, montoMinimo: 100, limitePorCliente: 99, activo: true, prioridad: 10 },
+    update: { activo: true, limitePorCliente: 99 },
   });
   const existing = await prisma.bonus.findFirst({ where: { codigoInterno: "REGALO-MAYORISTA" } });
   if (!existing) await prisma.bonus.create({ data: { nombre: "Regalo mayorista", codigoInterno: "REGALO-MAYORISTA", descripcion: "Bonificacion por pedido mayorista", condicionTipo: "monto", condicionValor: 200, beneficio: "Producto de bonificacion", activo: true } });

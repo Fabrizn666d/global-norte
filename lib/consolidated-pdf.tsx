@@ -52,7 +52,7 @@ export async function createConsolidatedPdf(input: { rows: ConsolidatedRow[]; fr
         </View>
         <View style={styles.table}>
           <View style={styles.head}>
-            <Text style={styles.code}>Codigo</Text><Text style={styles.product}>Producto</Text><Text style={styles.category}>Categoria</Text><Text style={styles.brand}>Marca</Text><Text style={styles.unit}>Unidad</Text><Text style={styles.qty}>Cantidad</Text><Text style={styles.orders}>Pedidos</Text><Text style={styles.subtotal}>Subtotal</Text><Text style={styles.note}>Stock</Text>
+            <Text style={styles.code}>Codigo</Text><Text style={styles.product}>Producto</Text><Text style={styles.category}>Categoria</Text><Text style={styles.brand}>Marca</Text><Text style={styles.unit}>Unidad</Text><Text style={styles.qty}>Cantidad</Text><Text style={styles.orders}>Pedidos</Text><Text style={styles.subtotal}>Subtotal</Text><Text style={styles.note}>Observacion</Text>
           </View>
           {input.rows.map((row) => (
             <View key={row.codigo} style={styles.row} wrap={false}>

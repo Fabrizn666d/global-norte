@@ -120,6 +120,7 @@ const productSchema = z.object({
   etiquetaDestacada: z.string().optional().nullable(),
   enOferta: z.boolean().default(false),
   nuevo: z.boolean().default(false),
+  agotado: z.boolean().default(false),
   tags: z.array(z.string()).default([]),
   seoTitulo: z.string().optional().nullable(),
   seoDesc: z.string().optional().nullable(),
@@ -305,8 +306,8 @@ function productWhere(search: URLSearchParams, includeInactive = false): Prisma.
   }
   if (categoria) where.category = { slug: categoria };
   if (marca) where.brand = { slug: marca };
-  if (search.get("disponible") === "1") where.stock = { gt: 0 };
-  if (search.get("oferta") === "1") addAnd({ OR: [{ enOferta: true }, { etiquetaDestacada: "oferta" }, { precioAnterior: { not: null } }, { destacado: true }] });
+  if (search.get("disponible") === "1") where.agotado = false;
+  if (search.get("oferta") === "1") addAnd({ OR: [{ enOferta: true }, { etiquetaDestacada: "oferta" }, { precioAnterior: { not: null } }] });
   if (search.get("destacado") === "1") where.destacado = true;
   if (search.get("home") === "1") {
     delete where.destacado;
@@ -522,9 +523,10 @@ async function publicGet(request: NextRequest, segments: string[]) {
 
   if (first === "pedidos" && second) {
     const session = await requireCustomer(request);
-    if (!session) return fail("No autorizado", 401);
+    const allowGuest = request.nextUrl.searchParams.get("guest") === "1";
+    if (!session && !allowGuest) return fail("No autorizado", 401);
     const order = await prisma.order.findFirst({
-      where: { id: second, userId: session.id },
+      where: { id: second, ...(session ? { userId: session.id } : { userId: null }) },
       include: { items: true, historial: { orderBy: { createdAt: "asc" } } },
     });
     if (!order) return fail("Pedido no encontrado", 404);
@@ -534,9 +536,10 @@ async function publicGet(request: NextRequest, segments: string[]) {
   if (first === "pdf" && second) {
     const session = await requireCustomer(request);
     const admin = await requireAdmin(request);
-    if (!session && !admin) return fail("No autorizado", 401);
+    const allowGuest = request.nextUrl.searchParams.get("guest") === "1";
+    if (!session && !admin && !allowGuest) return fail("No autorizado", 401);
     const order = await prisma.order.findFirst({
-      where: { id: second, ...(session ? { userId: session.id } : {}) },
+      where: { id: second, ...(session ? { userId: session.id } : admin ? {} : { userId: null }) },
     });
     if (!order?.pdfUrl) return fail("PDF no encontrado", 404);
     const filePath = path.join(process.cwd(), "public", order.pdfUrl.replace(/^\//, ""));
@@ -567,7 +570,7 @@ async function publicPost(request: NextRequest, segments: string[]) {
   }
 
   if (first === "auth" && second === "registro") {
-    const limited = await checkRateLimit(ip, "registro", 3, 60 * 60 * 1000);
+    const limited = await checkRateLimit(ip, "registro", 20, 60 * 60 * 1000);
     if (!limited.ok) return fail("Demasiados registros desde esta IP", 429);
     const data = registerSchema.parse(await readJson(request));
     if (data.captchaToken && !(await verifyCaptcha(data.captchaToken))) return fail("Captcha invalido", 400);
@@ -669,12 +672,11 @@ async function publicPost(request: NextRequest, segments: string[]) {
 
   if (first === "cupones" && second === "validar") {
     const session = await requireCustomer(request);
-    if (!session) return fail("Inicia sesion para aplicar beneficios", 401);
     const body = await readJson(request);
     const items = Array.isArray(body.items) ? body.items as Array<{ productId: string; cantidad: number; tipoPrecio?: string }> : [];
     if (!items.length) return fail("El carrito esta vacio", 400);
     const result = await evaluateCommerce({
-      userId: session.id,
+      userId: session?.id,
       couponCode: asString(body.couponCode),
       lines: await commerceLines(items),
     });
@@ -740,24 +742,23 @@ async function publicDelete(request: NextRequest, segments: string[]) {
 
 async function checkout(request: NextRequest) {
   const session = await requireCustomer(request);
-  if (!session) return fail("Inicia sesion o registrate para finalizar el pedido", 401);
-  const limited = await checkRateLimit(getIp(request), "checkout", 5, 60 * 60 * 1000);
+  const limited = await checkRateLimit(getIp(request), "checkout", 30, 60 * 60 * 1000);
   if (!limited.ok) return fail("Demasiados pedidos desde esta IP", 429);
 
   const data = checkoutSchema.parse(await readJson(request));
   if (data.captchaToken && !(await verifyCaptcha(data.captchaToken))) return fail("Captcha invalido", 400);
 
-  const user = await prisma.user.findUnique({ where: { id: session.id } });
-  if (!user || user.bloqueado) return fail("Cuenta no disponible", 403);
+  const user = session ? await prisma.user.findUnique({ where: { id: session.id } }) : null;
+  if (session && (!user || user.bloqueado)) return fail("Cuenta no disponible", 403);
 
-  const serverCart = await getOrCreateCart(session.id);
+  const serverCart = session ? await getOrCreateCart(session.id) : null;
   const requestedItems = data.items?.length
     ? data.items
-    : serverCart.items.map((item) => ({ productId: item.productId, cantidad: item.cantidad, tipoPrecio: item.tipoPrecio }));
+    : serverCart?.items.map((item) => ({ productId: item.productId, cantidad: item.cantidad, tipoPrecio: item.tipoPrecio })) ?? [];
   if (!requestedItems.length) return fail("El carrito esta vacio", 400);
 
   const products = await prisma.product.findMany({
-    where: { id: { in: requestedItems.map((item) => item.productId) }, activo: true },
+    where: { id: { in: requestedItems.map((item) => item.productId) }, activo: true, agotado: false },
     include: { brand: true },
   });
   const productMap = new Map(products.map((product) => [product.id, product]));
@@ -780,7 +781,7 @@ async function checkout(request: NextRequest) {
 
   const subtotal = orderItems.reduce((sum, item) => sum + item.subtotal, 0);
   const commerce = await evaluateCommerce({
-    userId: user.id,
+    userId: user?.id,
     couponCode: data.couponCode,
     lines: orderItems.map((item) => ({
       productId: item.product.id,
@@ -791,7 +792,7 @@ async function checkout(request: NextRequest) {
     })),
   });
   const numero = await nextOrderNumber();
-  const contacto = data.contacto || data.nombre || user?.nombre || "Cliente";
+  const contacto = data.contacto || data.nombre || user?.nombre || "Cliente Invitado";
   const partes = contacto.trim().split(/\s+/);
   const clienteNombre = user?.nombre ?? partes[0] ?? "Cliente";
   const clienteApellido = user?.apellido ?? (partes.slice(1).join(" ") || "-");
@@ -808,7 +809,7 @@ async function checkout(request: NextRequest) {
         clienteTelefono: telefono,
         clienteDni: data.dni || user?.dni,
         clienteRuc: data.ruc || user?.ruc,
-        clienteNegocio: data.nombreNegocio || user?.nombreNegocio,
+        clienteNegocio: data.nombreNegocio || user?.nombreNegocio || (user ? null : "Cliente Invitado"),
         entregaDireccion: data.direccion,
         entregaDistrito: data.distrito || "Por coordinar",
         entregaProvincia: data.provincia,
@@ -848,7 +849,7 @@ async function checkout(request: NextRequest) {
       await tx.product.update({ where: { id: item.product.id }, data: { vendidos: { increment: item.cantidad } } });
     }
     if (commerce.coupon) {
-      await tx.couponUsage.create({ data: { couponId: commerce.coupon.id, userId: user.id, orderId: created.id } });
+      if (user) await tx.couponUsage.create({ data: { couponId: commerce.coupon.id, userId: user.id, orderId: created.id } });
       await tx.coupon.update({ where: { id: commerce.coupon.id }, data: { cantidadUsos: { increment: 1 } } });
     }
     if (serverCart) await tx.cartItem.deleteMany({ where: { cartId: serverCart.id } });
@@ -1115,7 +1116,7 @@ async function adminPost(request: NextRequest, segments: string[]) {
         brandId: body.brandId || null,
         imagenes: JSON.stringify(body.imagenPrincipal ? [body.imagenPrincipal] : []),
         tags: JSON.stringify(body.tags),
-        agotado: body.stock <= 0,
+        agotado: body.agotado,
       },
     });
     await linkMediaAsset(product.imagenPrincipal, "product", product.id);
@@ -1450,7 +1451,6 @@ async function adminPut(request: NextRequest, segments: string[]) {
       category: data.categoryId ? { connect: { id: data.categoryId } } : undefined,
       tags: data.tags ? JSON.stringify(data.tags) : undefined,
       imagenes: data.imagenPrincipal ? JSON.stringify([data.imagenPrincipal]) : undefined,
-      agotado: data.stock === undefined ? undefined : data.stock <= 0,
     };
     delete (updateData as Data).brandId;
     delete (updateData as Data).categoryId;
@@ -1697,7 +1697,7 @@ async function dashboardReport() {
       prisma.order.aggregate({ where: { createdAt: { gte: yesterday, lt: today }, estado: { not: "cancelado" } }, _sum: { total: true } }),
       prisma.product.count({ where: { activo: true } }),
       prisma.user.count({ where: { rol: "cliente" } }),
-      prisma.product.findMany({ where: { activo: true }, select: { id: true, stock: true, stockMinimo: true } }),
+      prisma.product.findMany({ where: { activo: true }, select: { id: true, agotado: true } }),
       prisma.order.findMany({ include: { items: true }, orderBy: { createdAt: "desc" }, take: 10 }),
       prisma.order.findMany({ where: { createdAt: { gte: last30 } }, include: { items: true } }),
       prisma.orderItem.groupBy({ by: ["productId", "nombre", "codigoInterno"], _sum: { cantidad: true, subtotal: true }, orderBy: { _sum: { cantidad: "desc" } }, take: 10 }),
@@ -1719,8 +1719,8 @@ async function dashboardReport() {
       ventasAyer: salesYesterday._sum.total ?? 0,
       productos: products,
       clientes: clients,
-      stockBajo: lowProducts.filter((product) => product.stock <= product.stockMinimo).length,
-      sinStock: lowProducts.filter((product) => product.stock <= 0).length,
+      stockBajo: 0,
+      sinStock: lowProducts.filter((product) => product.agotado).length,
     },
     lastOrders,
     charts: {
@@ -1791,7 +1791,7 @@ async function consolidatedReport(request: NextRequest, format?: string) {
       current.subtotal += item.subtotal;
       current.orderIds.add(order.id);
       current.pedidos = current.orderIds.size;
-      current.observacion = item.product.stock < current.cantidad || item.product.stock <= item.product.stockMinimo ? "Stock bajo" : "";
+      current.observacion = item.product.agotado ? "Sin stock" : "";
       grouped.set(item.productId, current);
     }
   }
@@ -1893,7 +1893,7 @@ async function exportOrders(request: NextRequest) {
 
 async function exportProducts() {
   const products = await prisma.product.findMany({ include: { category: true, brand: true }, orderBy: { codigoInterno: "asc" } });
-  const csv = toCsv(products.map((product) => ({ codigo: product.codigoInterno, nombre: product.nombre, categoria: product.category.nombre, marca: product.brand?.nombre ?? "", precioUnitario: product.precioUnitario, precioCaja: product.precioCaja ?? "", stock: product.stock, activo: product.activo })));
+  const csv = toCsv(products.map((product) => ({ codigo: product.codigoInterno, nombre: product.nombre, categoria: product.category.nombre, marca: product.brand?.nombre ?? "", precioUnitario: product.precioUnitario, precioCaja: product.precioCaja ?? "", disponibilidad: product.agotado ? "Sin stock" : "Disponible", activo: product.activo })));
   return new NextResponse(csv, { headers: { "Content-Type": "text/csv; charset=utf-8", "Content-Disposition": "attachment; filename=inventario-global-norte.csv" } });
 }
 
@@ -1972,9 +1972,8 @@ async function reports(kind: string, request: NextRequest) {
   if (kind === "inventario") {
     const products = await prisma.product.findMany({ include: { category: true, brand: true } });
     return ok({
-      stockBajo: products.filter((product) => product.stock <= product.stockMinimo),
-      agotados: products.filter((product) => product.stock <= 0),
-      valorTotal: products.reduce((sum, product) => sum + product.stock * product.precioUnitario, 0),
+      disponibles: products.filter((product) => !product.agotado),
+      agotados: products.filter((product) => product.agotado),
     });
   }
 

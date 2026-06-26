@@ -19,6 +19,8 @@
     "images:promote": "tsx scripts/promote-product-images.ts",
     "images:status": "tsx scripts/image-status.ts",
     "catalog:classify": "tsx scripts/classify-catalog.ts",
+    "qa:seed": "tsx scripts/qa-seed.ts",
+    "qa:clean": "tsx scripts/qa-clean.ts",
     "db:reset": "prisma migrate reset --force && npm run db:seed",
     "setup": "npm run db:migrate && npm run db:seed"
   },

@@ -284,13 +284,13 @@ function AdminProforma({ order, logoSrc, company }: { order: PdfOrder; logoSrc: 
         <Header order={order} title="PROFORMA INTERNA / PEDIDO" logoSrc={logoSrc} company={company} admin />
         <View style={styles.box}>
           <Text style={styles.boxTitle}>{company.legalName}</Text>
-          <Text style={styles.companyLine}>Pedido para preparacion. Documento interno para validar stock, precios, estado y entrega.</Text>
+          <Text style={styles.companyLine}>Pedido para preparacion. Documento interno para validar disponibilidad, precios, estado y entrega.</Text>
         </View>
         <CustomerAndDelivery order={order} admin />
         <ItemsTable order={order} admin />
         <TotalsAndMessage order={order} company={company} admin />
         <View style={styles.signatureRow}>
-          <View style={styles.signature}><Text>Validacion de stock</Text></View>
+          <View style={styles.signature}><Text>Validacion de disponibilidad</Text></View>
           <View style={styles.sectionGap} />
           <View style={styles.signature}><Text>Confirmacion de entrega</Text></View>
         </View>

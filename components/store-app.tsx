@@ -50,6 +50,7 @@ type Product = {
   stock: number;
   stockMinimo: number;
   unidad: string;
+  agotado: boolean;
   imagenPrincipal?: string | null;
   destacado: boolean;
   enOferta: boolean;
@@ -105,6 +106,7 @@ const PLACEHOLDER_IMAGE = "/brand/product-placeholder.svg";
 const LOGO_IMAGE = "/brand/global-norte-logo.jpg";
 const CART_STORAGE_KEY = "gn_cart_v2";
 const COUPON_STORAGE_KEY = "gn_coupon_v1";
+const LAST_ORDER_STORAGE_KEY = "gn_last_order_v1";
 
 const stateLabel: Record<string, string> = {
   nuevo: "Nuevo",
@@ -345,7 +347,15 @@ export function StoreApp({ route }: { route: string[] }) {
         }
 
         if (currentView === "pedido-confirmado" && currentSearch.get("id")) {
-          const data = await api<{ order: Order }>(`/api/pedidos/${currentSearch.get("id")}`);
+          const id = currentSearch.get("id");
+          try {
+            const cached = JSON.parse(window.sessionStorage.getItem(LAST_ORDER_STORAGE_KEY) || "null") as Order | null;
+            if (cached?.id === id) {
+              if (active) setOrder(cached);
+              return;
+            }
+          } catch {}
+          const data = await api<{ order: Order }>(`/api/pedidos/${currentSearch.get("id")}${user ? "" : "?guest=1"}`);
           if (active) setOrder(data.order);
           return;
         }
@@ -381,7 +391,7 @@ export function StoreApp({ route }: { route: string[] }) {
     return () => {
       active = false;
     };
-  }, [key, queryString, routePath]);
+  }, [key, queryString, routePath, user?.id]);
 
   async function addToCart(productId: string, tipoPrecio = "unidad", cantidad = 1) {
     const found = [product, ...products, ...related].find((item): item is Product => Boolean(item && item.id === productId));
@@ -435,7 +445,7 @@ export function StoreApp({ route }: { route: string[] }) {
   }
 
   return (
-    <div className="min-h-screen bg-[#F4F5F7] text-neutral-950">
+    <div className="min-h-screen overflow-x-hidden bg-[#F4F5F7] text-neutral-950">
       <header className="sticky top-0 z-40 shadow-[0_10px_30px_rgba(0,0,0,0.08)]">
         <div className="bg-[#D71920] text-white">
           <div className="mx-auto flex max-w-7xl items-center justify-between gap-3 px-4 py-2 text-[11px] font-bold uppercase tracking-wide sm:text-xs">
@@ -548,7 +558,7 @@ export function StoreApp({ route }: { route: string[] }) {
           <CartView cart={cart} total={cartTotal} user={user} banners={banners} message={company.cartMessage} onUpdate={updateCartItem} onRemove={removeCartItem} onClear={clearCart} />
         ) : null}
         {view === "checkout" ? <CheckoutView cart={cart} total={cartTotal} user={user} authReady={authReady} message={company.checkoutMessage} onClear={clearCart} /> : null}
-        {view === "pedido-confirmado" ? <ConfirmedView order={order} receiptText={company.receiptText} /> : null}
+        {view === "pedido-confirmado" ? <ConfirmedView order={order} receiptText={company.receiptText} user={user} /> : null}
         {view === "mi-cuenta" ? <AccountView user={user} orders={orders} order={order} route={route} /> : null}
         {view === "catalogo" && route[1] && product ? (
           <ProductDetail product={product} related={related} onAdd={addToCart} />
@@ -624,32 +634,32 @@ function Hero({ banner, onHelp, logoUrl }: { banner?: Banner; onHelp: () => void
   const hasCustomImage = Boolean(banner?.imagenDesktop && banner.imagenDesktop !== logoUrl);
   return (
     <section className="bg-[#F4F5F7] px-4 py-6">
-      <div className="mx-auto grid max-w-7xl overflow-hidden rounded-[28px] bg-[radial-gradient(circle_at_82%_20%,rgba(255,255,255,0.28),transparent_28%),linear-gradient(135deg,#111111_0%,#D71920_48%,#F9FAFB_100%)] shadow-[0_24px_70px_rgba(17,17,17,0.18)] lg:grid-cols-[1.05fr_0.95fr]">
+      <div className="mx-auto grid max-w-7xl overflow-hidden rounded-[22px] bg-[radial-gradient(circle_at_82%_20%,rgba(255,255,255,0.28),transparent_28%),linear-gradient(135deg,#111111_0%,#D71920_48%,#F9FAFB_100%)] shadow-[0_24px_70px_rgba(17,17,17,0.18)] sm:rounded-[28px] lg:grid-cols-[1.05fr_0.95fr]">
         <div className="p-6 text-white sm:p-10 lg:p-12">
           <p className="mb-4 inline-flex rounded-full bg-white/15 px-4 py-2 text-xs font-black uppercase tracking-wide ring-1 ring-white/25">Mayorista B2B en Lima Norte</p>
-          <h1 className="max-w-3xl text-4xl font-black leading-tight md:text-6xl">
+          <h1 className="max-w-3xl text-3xl font-black leading-tight sm:text-4xl md:text-6xl">
             {banner?.titulo || "Precios mayoristas para bodegas y negocios"}
           </h1>
           <p className="mt-5 max-w-2xl text-base font-medium leading-7 text-white/90 md:text-lg">
             {banner?.descripcion || banner?.subtitulo || "Abarrotes, limpieza e higiene con pedido online y entrega coordinada en Lima Norte."}
           </p>
-          <div className="mt-7 flex flex-wrap gap-3">
-            <Link href={banner?.ctaLink || "/catalogo"} className="inline-flex h-12 items-center gap-2 rounded-2xl bg-white px-5 text-sm font-black text-[#D71920] shadow-lg transition hover:-translate-y-0.5">
+          <div className="mt-7 grid gap-3 sm:flex sm:flex-wrap">
+            <Link href={banner?.ctaLink || "/catalogo"} className="inline-flex h-12 items-center justify-center gap-2 rounded-2xl bg-white px-5 text-sm font-black text-[#D71920] shadow-lg transition hover:-translate-y-0.5">
               {banner?.ctaTexto || "Ver catalogo"} <ArrowRight className="h-4 w-4" />
             </Link>
-            <Link href="/registro" className="inline-flex h-12 items-center gap-2 rounded-2xl border border-white/35 bg-black/20 px-5 text-sm font-black text-white backdrop-blur transition hover:-translate-y-0.5 hover:bg-black/30">
+            <Link href="/registro" className="inline-flex h-12 items-center justify-center gap-2 rounded-2xl border border-white/35 bg-black/20 px-5 text-sm font-black text-white backdrop-blur transition hover:-translate-y-0.5 hover:bg-black/30">
               Crear cuenta mayorista <Building2 className="h-4 w-4" />
             </Link>
-            <button onClick={onHelp} className="inline-flex h-12 items-center rounded-2xl border border-white/35 px-5 text-sm font-black text-white">¿Como pedir?</button>
+            <button onClick={onHelp} className="inline-flex h-12 items-center justify-center rounded-2xl border border-white/35 px-5 text-sm font-black text-white">¿Como pedir?</button>
           </div>
           <div className="mt-8 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
             <HeroMetric icon={<Package className="h-5 w-5" />} label="409 productos" />
             <HeroMetric icon={<ShieldCheck className="h-5 w-5" />} label="PDF automatico" />
-            <HeroMetric icon={<BadgeCheck className="h-5 w-5" />} label="Pago al entregar" />
+            <HeroMetric icon={<BadgeCheck className="h-5 w-5" />} label="Pago Contra Entrega" />
             <HeroMetric icon={<Phone className="h-5 w-5" />} label="Atencion por WhatsApp" />
           </div>
         </div>
-        <div className="relative min-h-[340px] p-6 lg:p-10">
+        <div className="relative min-h-[300px] p-4 sm:min-h-[340px] sm:p-6 lg:p-10">
           <div className="absolute inset-x-10 bottom-8 h-24 rounded-[50%] bg-black/20 blur-2xl" />
           {hasCustomImage ? (
             <picture><source media="(max-width: 640px)" srcSet={imageSrc(banner?.imagenMobile || banner?.imagenDesktop)} /><img src={imageSrc(banner?.imagenDesktop)} onError={usePlaceholderImage} alt={banner?.titulo || "Banner Global Norte"} className="relative h-full min-h-[300px] w-full rounded-[26px] object-cover shadow-2xl" /></picture>
@@ -667,7 +677,7 @@ function Hero({ banner, onHelp, logoUrl }: { banner?: Banner; onHelp: () => void
                 <div key={item} className="rounded-2xl border border-neutral-200 bg-[#F7F7F8] p-4">
                   <Package className="mb-4 h-6 w-6 text-[#D71920]" />
                   <p className="text-sm font-black">{item}</p>
-                  <p className="text-xs font-semibold text-neutral-500">Stock mayorista</p>
+                  <p className="text-xs font-semibold text-neutral-500">Venta mayorista</p>
                 </div>
               ))}
             </div>
@@ -873,18 +883,28 @@ function FilterLink({ label, param }: { label: string; param: string }) {
   );
 }
 
+function OutOfStockRibbon() {
+  return (
+    <span className="pointer-events-none absolute -right-10 top-5 z-10 w-36 rotate-45 bg-[#D71920] py-1 text-center text-[10px] font-black uppercase tracking-wide text-white shadow-md">
+      Sin stock
+    </span>
+  );
+}
+
 function ProductCard({ product, onAdd }: { product: Product; onAdd: (productId: string, tipoPrecio?: string, cantidad?: number) => Promise<void> }) {
   const [quantity, setQuantity] = useState(1);
   return (
     <article className="group overflow-hidden rounded-[20px] border border-neutral-200 bg-white shadow-sm transition duration-200 hover:-translate-y-1 hover:border-[#D71920]/40 hover:shadow-xl">
-      <Link href={`/catalogo/${product.slug}`} className="block bg-gradient-to-br from-white via-[#FAFAFA] to-[#F0F0F0] p-4">
+      <Link href={`/catalogo/${product.slug}`} className="relative block overflow-hidden bg-gradient-to-br from-white via-[#FAFAFA] to-[#F0F0F0] p-4">
+        {product.agotado ? <OutOfStockRibbon /> : null}
         <ProductImage src={productImageSource(product)} alt={product.nombre} className="mx-auto aspect-square h-32 w-full max-w-40 object-contain transition duration-200 group-hover:scale-105 sm:h-36" loading="lazy" />
       </Link>
       <div className="p-3 sm:p-4">
         <div className="mb-2 flex min-h-6 flex-wrap gap-1.5">
           <span className="rounded-full bg-[#FFF5F5] px-2.5 py-1 text-[10px] font-black uppercase text-[#D71920]">{product.codigoInterno}</span>
+          {product.enOferta ? <span className="rounded-full bg-[#D71920] px-2.5 py-1 text-[10px] font-black uppercase text-white">Oferta</span> : null}
+          {product.nuevo ? <span className="rounded-full bg-green-50 px-2.5 py-1 text-[10px] font-black uppercase text-green-700">Nuevo</span> : null}
           {product.etiquetaDestacada ? <span className="rounded-full bg-neutral-900 px-2.5 py-1 text-[10px] font-black uppercase text-white">{product.etiquetaDestacada.replace("_", " ")}</span> : null}
-          {product.stock <= product.stockMinimo ? <span className="rounded-full bg-orange-50 px-2.5 py-1 text-[10px] font-black uppercase text-orange-700">Stock bajo</span> : null}
         </div>
         <Link href={`/catalogo/${product.slug}`} className="line-clamp-2 min-h-10 text-[13px] font-black leading-5 text-neutral-950 hover:text-[#D71920] sm:text-sm">
           {product.nombre}
@@ -901,8 +921,8 @@ function ProductCard({ product, onAdd }: { product: Product; onAdd: (productId: 
             <button onClick={() => setQuantity((value) => value + 1)} className="h-full w-9 text-neutral-700 transition hover:bg-white" title="Sumar"><Plus className="mx-auto h-4 w-4" /></button>
           </div>
         </div>
-        <button onClick={() => onAdd(product.id, "unidad", quantity)} className="mt-3 inline-flex h-10 w-full items-center justify-center gap-2 rounded-xl bg-[#D71920] px-3 text-xs font-black uppercase tracking-wide text-white transition hover:bg-[#B51218]">
-          <Plus className="h-4 w-4" /> Agregar al pedido
+        <button disabled={product.agotado} onClick={() => onAdd(product.id, "unidad", quantity)} className="mt-3 inline-flex h-10 w-full items-center justify-center gap-2 rounded-xl bg-[#D71920] px-3 text-xs font-black uppercase tracking-wide text-white transition hover:bg-[#B51218] disabled:bg-neutral-300 disabled:text-neutral-600">
+          <Plus className="h-4 w-4" /> {product.agotado ? "Sin stock" : "Agregar al pedido"}
         </button>
       </div>
     </article>
@@ -915,17 +935,17 @@ function ProductDetail({ product, related, onAdd }: { product: Product; related:
   return (
     <section className="mx-auto max-w-7xl px-4 py-8">
       <div className="grid gap-8 lg:grid-cols-[520px_1fr]">
-        <div className="aspect-square overflow-hidden rounded border border-neutral-200 bg-white">
+        <div className="relative aspect-square overflow-hidden rounded border border-neutral-200 bg-white">
+          {product.agotado ? <OutOfStockRibbon /> : null}
           <ProductImage src={productImageSource(product)} alt={product.nombre} className="h-full w-full object-cover" />
         </div>
         <div>
           <p className="text-xs font-bold uppercase tracking-wide text-[#D32F2F]">{product.codigoInterno}</p>
           <h1 className="mt-2 text-3xl font-extrabold text-neutral-950">{product.nombre}</h1>
           <p className="mt-3 max-w-2xl text-sm leading-7 text-neutral-600">{product.descripcion}</p>
-          <div className="mt-6 grid gap-3 sm:grid-cols-3">
+          <div className="mt-6 grid gap-3 sm:grid-cols-2">
             <Info label="Categoria" value={product.category?.nombre} />
             <Info label="Marca" value={product.brand?.nombre ?? "Global Norte"} />
-            <Info label="Stock" value={`${product.stock} ${product.unidad}`} />
           </div>
           <div className="mt-6 rounded border border-neutral-200 bg-white p-4">
             <p className="text-3xl font-extrabold text-[#D32F2F]">{money(type === "caja" && product.precioCaja ? product.precioCaja : product.precioUnitario)}</p>
@@ -943,8 +963,8 @@ function ProductDetail({ product, related, onAdd }: { product: Product; related:
                   <Plus className="mx-auto h-4 w-4" />
                 </button>
               </div>
-              <button onClick={() => onAdd(product.id, type, quantity)} className="inline-flex h-11 items-center gap-2 rounded bg-[#D32F2F] px-4 text-sm font-bold text-white hover:bg-[#B71C1C]">
-                <ShoppingCart className="h-4 w-4" /> Agregar
+              <button disabled={product.agotado} onClick={() => onAdd(product.id, type, quantity)} className="inline-flex h-11 items-center gap-2 rounded bg-[#D32F2F] px-4 text-sm font-bold text-white hover:bg-[#B71C1C] disabled:bg-neutral-300 disabled:text-neutral-600">
+                <ShoppingCart className="h-4 w-4" /> {product.agotado ? "Sin stock" : "Agregar"}
               </button>
             </div>
           </div>
@@ -1080,7 +1100,7 @@ function CartView({ cart, total, user, banners, message, onUpdate, onRemove, onC
   const [applying, setApplying] = useState(false);
   const cartKey = cart?.items.map((item) => `${item.product.id}:${item.cantidad}:${item.tipoPrecio}`).join("|") ?? "";
   const validate = useCallback(async (code: string, silent = false) => {
-    if (!user || !cart?.items.length) return;
+    if (!cart?.items.length) return;
     setApplying(true);
     try {
       const data = await api<{ benefit: CommerceBenefit }>("/api/cupones/validar", { method: "POST", body: JSON.stringify({ couponCode: code, items: cart.items.map((item) => ({ productId: item.product.id, cantidad: item.cantidad, tipoPrecio: item.tipoPrecio })) }) });
@@ -1089,8 +1109,8 @@ function CartView({ cart, total, user, banners, message, onUpdate, onRemove, onC
       if (!silent) toast.success(data.benefit.coupon ? "Cupon aplicado" : "Beneficios actualizados");
     } catch (error) { setBenefit(null); if (!silent) toast.error(error instanceof Error ? error.message : "Cupon invalido"); }
     finally { setApplying(false); }
-  }, [cart, user]);
-  useEffect(() => { const saved = window.localStorage.getItem(COUPON_STORAGE_KEY) || ""; setCouponCode(saved); if (user && cartKey) validate(saved, true); }, [cartKey, user, validate]);
+  }, [cart]);
+  useEffect(() => { const saved = window.localStorage.getItem(COUPON_STORAGE_KEY) || ""; setCouponCode(saved); if (cartKey) validate(saved, true); }, [cartKey, validate]);
   if (!cart?.items.length) return <EmptyState title="Carrito vacio" action="/catalogo" actionLabel="Ver catalogo" icon={<ShoppingCart className="h-8 w-8" />} />;
   const campaign = banners.find((banner) => banner.tipo === "carrito");
   return (<>
@@ -1126,10 +1146,11 @@ function CartView({ cart, total, user, banners, message, onUpdate, onRemove, onC
         {benefit?.customerBenefit?.message ? <p className="mt-2 rounded bg-red-50 p-2 text-xs font-bold text-[#D71920]">Por ser cliente frecuente: {benefit.customerBenefit.message}</p> : null}
         {benefit?.bonuses.map((bonus, index) => <p key={`${bonus.name}-${index}`} className="mt-2 rounded bg-amber-50 p-2 text-xs font-bold text-amber-800">Te obsequiamos: {bonus.name} - S/ 0.00</p>)}
         <div className="mt-4 flex justify-between border-t border-neutral-200 pt-4 text-xl font-extrabold text-[#D32F2F]"><span>Total</span><span>{money(benefit?.total ?? total)}</span></div>
-        <div className="mt-4 flex gap-2"><input value={couponCode} onChange={(event) => setCouponCode(event.target.value.toUpperCase())} placeholder="Ingresar cupon" className="h-10 min-w-0 flex-1 rounded border border-neutral-300 px-3 text-sm" /><button disabled={!user || applying} onClick={() => validate(couponCode)} className="rounded border border-[#D71920] px-3 text-xs font-black text-[#D71920] disabled:opacity-50">{applying ? "Validando" : "Aplicar"}</button></div>
-        <Link href={user ? "/checkout" : "/login?next=%2Fcheckout"} className="mt-5 inline-flex h-11 w-full items-center justify-center rounded bg-[#D32F2F] text-sm font-bold text-white hover:bg-[#B71C1C]">
-          {user ? "Finalizar pedido" : "Ingresar para finalizar"}
+        <div className="mt-4 flex gap-2"><input value={couponCode} onChange={(event) => setCouponCode(event.target.value.toUpperCase())} placeholder="Ingresar cupon" className="h-10 min-w-0 flex-1 rounded border border-neutral-300 px-3 text-sm" /><button disabled={applying} onClick={() => validate(couponCode)} className="rounded border border-[#D71920] px-3 text-xs font-black text-[#D71920] disabled:opacity-50">{applying ? "Validando" : "Aplicar"}</button></div>
+        <Link href="/checkout" className="mt-5 inline-flex h-11 w-full items-center justify-center rounded bg-[#D32F2F] text-sm font-bold text-white hover:bg-[#B71C1C]">
+          Finalizar pedido
         </Link>
+        {!user ? <Link href="/checkout" className="mt-2 inline-flex h-11 w-full items-center justify-center rounded border border-neutral-300 bg-white text-sm font-bold text-neutral-800 hover:border-[#D32F2F]">Continuar como invitado</Link> : null}
         <p className="mt-3 text-xs font-semibold leading-5 text-neutral-500">{message || "Completa tus datos para coordinar tu pedido. No es una compra confirmada; un asesor revisara disponibilidad y coordinara por WhatsApp."}</p>
       </aside>
     </section></>
@@ -1142,20 +1163,13 @@ function CheckoutView({ cart, total, user, authReady, message, onClear }: { cart
   const [couponCode, setCouponCode] = useState("");
   const [benefit, setBenefit] = useState<CommerceBenefit | null>(null);
   useEffect(() => {
-    if (authReady && user === null) router.replace("/login?next=%2Fcheckout");
-  }, [authReady, router, user]);
-  useEffect(() => {
-    if (!user || !cart?.items.length) return;
+    if (!cart?.items.length) return;
     const code = window.localStorage.getItem(COUPON_STORAGE_KEY) || "";
     setCouponCode(code);
     api<{ benefit: CommerceBenefit }>("/api/cupones/validar", { method: "POST", body: JSON.stringify({ couponCode: code, items: cart.items.map((item) => ({ productId: item.product.id, cantidad: item.cantidad, tipoPrecio: item.tipoPrecio })) }) }).then((data) => setBenefit(data.benefit)).catch(() => setBenefit(null));
-  }, [user, cart]);
+  }, [cart]);
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!user) {
-      router.replace("/login?next=%2Fcheckout");
-      return;
-    }
     setSubmitting(true);
     const payload = {
       ...formData(event),
@@ -1165,30 +1179,30 @@ function CheckoutView({ cart, total, user, authReady, message, onClear }: { cart
     try {
       const data = await api<{ order: Order; waLink?: string }>("/api/orders", { method: "POST", body: JSON.stringify(payload) });
       toast.success("Pedido registrado. Un asesor confirmara disponibilidad y entrega.");
+      window.sessionStorage.setItem(LAST_ORDER_STORAGE_KEY, JSON.stringify(data.order));
       onClear();
       window.localStorage.removeItem(COUPON_STORAGE_KEY);
       router.push(`/pedido-confirmado?id=${data.order.id}`);
     } catch (error) {
       const message = error instanceof Error ? error.message : "No se pudo registrar el pedido";
       toast.error(message);
-      if (message.toLowerCase().includes("sesion")) router.replace("/login?next=%2Fcheckout");
     } finally {
       setSubmitting(false);
     }
   }
   if (!cart?.items.length) return <EmptyState title="Carrito vacio" action="/catalogo" actionLabel="Ver catalogo" icon={<ShoppingCart className="h-8 w-8" />} />;
   if (!authReady) return <EmptyState title="Validando sesion" action="/carrito" actionLabel="Volver al carrito" icon={<Loader2 className="h-8 w-8 animate-spin" />} />;
-  if (!user) return <EmptyState title="Inicia sesion para finalizar" action="/login?next=%2Fcheckout" actionLabel="Ingresar / Registrarse" icon={<UserRound className="h-8 w-8" />} />;
   return (
     <section className="mx-auto grid max-w-7xl gap-6 px-4 py-8 lg:grid-cols-[1fr_360px]">
       <form onSubmit={submit} className="rounded border border-neutral-200 bg-white p-5">
         <h1 className="mb-5 text-2xl font-extrabold text-neutral-950">Registrar pedido</h1>
+        {!user ? <p className="mb-4 rounded border border-neutral-200 bg-neutral-50 p-3 text-sm font-bold text-neutral-700">Continuar como invitado. Guardaremos el pedido como Cliente Invitado.</p> : null}
         <p className="mb-4 rounded bg-[#FFF5F5] p-3 text-sm font-semibold text-neutral-700">{message || "El pedido sera revisado y coordinado por WhatsApp."}</p>
         <div className="grid gap-3 md:grid-cols-2">
           <TextInput name="nombreNegocio" label="Nombre del negocio" defaultValue={user?.nombreNegocio ?? ""} />
-          <TextInput name="contacto" label="Nombre de contacto" defaultValue={user ? `${user.nombre} ${user.apellido}` : ""} required />
+          <TextInput name="contacto" label="Nombre" defaultValue={user ? `${user.nombre} ${user.apellido}` : ""} required />
           <TextInput name="dni" label="DNI/RUC opcional" defaultValue={user?.dni ?? user?.ruc ?? ""} />
-          <TextInput name="telefono" label="Telefono WhatsApp" defaultValue={user?.telefono ?? ""} required />
+          <TextInput name="telefono" label="Celular" defaultValue={user?.telefono ?? ""} required />
           <TextInput name="direccion" label="Direccion" defaultValue={user?.direccion ?? ""} required />
           <TextInput name="referencia" label="Referencia" defaultValue={user?.referencia ?? ""} />
           <TextInput name="mapsUrl" label="Link de Google Maps" type="url" placeholder="https://maps.google.com/..." />
@@ -1204,7 +1218,7 @@ function CheckoutView({ cart, total, user, authReady, message, onClear }: { cart
           <label className="grid gap-1 text-sm font-semibold text-neutral-700">
             Metodo de pago
             <select name="metodoPago" className="h-11 rounded border border-neutral-300 bg-white px-3 text-sm font-normal">
-              <option value="efectivo">Pago al entregar</option>
+              <option value="efectivo">Pago Contra Entrega</option>
               <option value="yape">Yape/Plin</option>
               <option value="transferencia">Transferencia</option>
               <option value="plin">Plin</option>
@@ -1243,7 +1257,7 @@ function CheckoutView({ cart, total, user, authReady, message, onClear }: { cart
   );
 }
 
-function ConfirmedView({ order, receiptText }: { order: Order | null; receiptText?: string }) {
+function ConfirmedView({ order, receiptText, user }: { order: Order | null; receiptText?: string; user?: User | null }) {
   return (
     <section className="mx-auto max-w-2xl px-4 py-12">
       <div className="rounded border border-neutral-200 bg-white p-6 text-center">
@@ -1269,13 +1283,13 @@ function ConfirmedView({ order, receiptText }: { order: Order | null; receiptTex
               </div>
             </div>
             <p className="mt-4 text-xs font-semibold text-neutral-500">
-              {receiptText || "Pedido sujeto a confirmacion de stock, precios y entrega. No es comprobante de pago."}
+              {receiptText || "Pedido sujeto a confirmacion de disponibilidad, precios y entrega. No es comprobante de pago."}
             </p>
             {order.entregaMapsUrl ? <a href={order.entregaMapsUrl} target="_blank" rel="noreferrer" className="mt-3 inline-flex text-sm font-bold text-[#D71920]">Abrir ubicacion registrada</a> : null}
             <div className="mt-5 flex flex-wrap justify-center gap-3">
-              {order.pdfUrl ? <a href={`/api/pdf/${order.id}`} target="_blank" className="inline-flex h-11 items-center gap-2 rounded border border-neutral-300 px-4 text-sm font-bold" rel="noreferrer"><ClipboardList className="h-4 w-4" /> Descargar PDF</a> : null}
+              {order.pdfUrl ? <a href={`/api/pdf/${order.id}${user ? "" : "?guest=1"}`} target="_blank" className="inline-flex h-11 items-center gap-2 rounded border border-neutral-300 px-4 text-sm font-bold" rel="noreferrer"><ClipboardList className="h-4 w-4" /> Descargar PDF</a> : null}
               <button onClick={() => window.print()} className="inline-flex h-11 items-center rounded border border-neutral-300 px-4 text-sm font-bold">Imprimir</button>
-              <Link href="/mi-cuenta/pedidos" className="inline-flex h-11 items-center rounded border border-neutral-300 px-4 text-sm font-bold">Ver mis pedidos</Link>
+              {user ? <Link href="/mi-cuenta/pedidos" className="inline-flex h-11 items-center rounded border border-neutral-300 px-4 text-sm font-bold">Ver mis pedidos</Link> : null}
               <a href={`https://wa.me/${COMPANY.whatsappNumber}?text=${encodeURIComponent(`Hola Global Norte, deseo coordinar el pedido ${order.numero}. Total estimado: ${money(order.total)}`)}`} target="_blank" rel="noreferrer" className="inline-flex h-11 items-center rounded border border-green-300 px-4 text-sm font-bold text-green-700">Coordinar por WhatsApp</a>
               <Link href="/catalogo" className="inline-flex h-11 items-center rounded bg-[#D32F2F] px-4 text-sm font-bold text-white">Seguir comprando</Link>
             </div>

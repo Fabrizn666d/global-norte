@@ -45,7 +45,7 @@ function applicableSubtotal(
 }
 
 export async function evaluateCommerce(input: {
-  userId: string;
+  userId?: string | null;
   couponCode?: string | null;
   lines: CommerceLine[];
 }) {
@@ -56,7 +56,7 @@ export async function evaluateCommerce(input: {
   let discount = 0;
   let coupon: null | { id: string; code: string; description: string; type: string } = null;
 
-  const benefit = await prisma.customerBenefit.findUnique({ where: { userId: input.userId } });
+  const benefit = input.userId ? await prisma.customerBenefit.findUnique({ where: { userId: input.userId } }) : null;
   const requestedCode = (input.couponCode || (benefit?.aplicarAutomatico ? benefit.cuponExclusivo : "") || "").trim().toUpperCase();
 
   if (requestedCode) {
@@ -67,7 +67,10 @@ export async function evaluateCommerce(input: {
     if (found.cantidadMaximaUsos !== null && found.cantidadUsos >= found.cantidadMaximaUsos) {
       throw new Error("El cupon alcanzo su limite de usos");
     }
-    const userUses = await prisma.couponUsage.count({ where: { couponId: found.id, userId: input.userId } });
+    if (!input.userId && (found.usoUnico || (found.limitePorCliente > 0 && found.limitePorCliente < 99))) {
+      throw new Error("Para usar este cupon necesitas iniciar sesion");
+    }
+    const userUses = input.userId ? await prisma.couponUsage.count({ where: { couponId: found.id, userId: input.userId } }) : 0;
     if ((found.usoUnico && userUses > 0) || userUses >= found.limitePorCliente) {
       throw new Error("Ya utilizaste el maximo permitido para este cupon");
     }
@@ -96,7 +99,7 @@ export async function evaluateCommerce(input: {
   const availableBonuses = await prisma.bonus.findMany({
     where: {
       activo: true,
-      OR: [{ clienteId: null }, { clienteId: input.userId }],
+      OR: input.userId ? [{ clienteId: null }, { clienteId: input.userId }] : [{ clienteId: null }],
     },
     orderBy: { createdAt: "asc" },
   });
@@ -107,7 +110,7 @@ export async function evaluateCommerce(input: {
     if (item.condicionTipo === "cantidad") applies = totalUnits >= item.condicionValor;
     if (item.condicionTipo === "categoria") applies = input.lines.some((line) => line.categoryId === item.categoryId && line.cantidad >= Math.max(1, item.condicionValor));
     if (item.condicionTipo === "marca") applies = input.lines.some((line) => line.brandId === item.brandId && line.cantidad >= Math.max(1, item.condicionValor));
-    if (item.condicionTipo === "cliente") applies = item.clienteId === input.userId;
+    if (item.condicionTipo === "cliente") applies = Boolean(input.userId) && item.clienteId === input.userId;
     if (item.condicionTipo === "fecha") applies = true;
     if (applies) bonuses.push({ source: "bonus", code: item.codigoInterno || undefined, name: item.nombre, description: item.beneficio, quantity: 1, price: 0 });
   }

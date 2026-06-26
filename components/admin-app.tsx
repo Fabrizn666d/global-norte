@@ -214,7 +214,7 @@ export function AdminApp({ route }: { route: string[] }) {
   if (!admin) return <AdminLogin onLogin={setAdmin} loading={loading} />;
 
   return (
-    <div className="min-h-screen bg-[#F8F8F8] text-neutral-900 lg:grid lg:grid-cols-[280px_1fr]">
+    <div className="min-h-screen overflow-x-hidden bg-[#F8F8F8] text-neutral-900 lg:grid lg:grid-cols-[280px_minmax(0,1fr)]">
       <aside className="border-r border-neutral-200 bg-white">
         <div className="flex items-center gap-3 border-b border-neutral-200 px-5 py-4">
           <img src={company.logoUrl || "/brand/global-norte-logo.jpg"} alt={company.name || "Global Norte"} className="h-12 w-12 object-contain" />
@@ -243,7 +243,7 @@ export function AdminApp({ route }: { route: string[] }) {
           </button>
         </div>
       </aside>
-      <main className="min-w-0">
+      <main className="min-w-0 overflow-hidden">
         <header className="border-b border-neutral-200 bg-white px-5 py-4">
           <p className="text-xs font-bold uppercase tracking-wide text-[#D32F2F]">{admin.rol}</p>
           <h1 className="text-2xl font-extrabold">{titleFor(active)}</h1>
@@ -382,7 +382,7 @@ function Dashboard({ data }: { data: AnyRow }) {
         <Kpi label="Pedidos hoy" value={kpis.pedidosHoy ?? 0} />
         <Kpi label="Ventas hoy" value={money(kpis.ventasHoy ?? 0)} />
         <Kpi label="Productos" value={kpis.productos ?? 0} sub={`${kpis.sinStock ?? 0} sin stock`} />
-        <Kpi label="Clientes" value={kpis.clientes ?? 0} sub={`${kpis.stockBajo ?? 0} stock bajo`} />
+        <Kpi label="Clientes" value={kpis.clientes ?? 0} sub="Base registrada" />
       </div>
       <div className="grid gap-4 xl:grid-cols-[1.4fr_1fr]">
         <Panel title="Pedidos y ventas">
@@ -447,7 +447,7 @@ function Orders({ data, detailId, reload, company }: { data: AnyRow; detailId?: 
     const order = data.order;
     return (
       <div className="grid gap-4">
-        <Panel title={`Proforma ${order.numero}`} help="Vista interna del pedido para validar stock, coordinar entrega y descargar proforma administrativa.">
+        <Panel title={`Proforma ${order.numero}`} help="Vista interna del pedido para validar disponibilidad, coordinar entrega y descargar proforma administrativa.">
           <div className="mb-4 grid gap-3 border-b border-neutral-200 pb-4 md:grid-cols-[120px_1fr_1fr]">
             <img src={PLACEHOLDER_IMAGE} alt="Global Norte" className="h-20 w-20 object-contain" />
             <div className="text-sm">
@@ -625,8 +625,8 @@ function Products({ data, categories, brands, reload }: { data: AnyRow; categori
       precioUnitario: Number(raw.precioUnitario),
       precioCaja: raw.precioCaja ? Number(raw.precioCaja) : null,
       imagenPrincipal: imageValue || raw.imagenPrincipal || null,
-      stock: Number(raw.stock ?? 0),
-      stockMinimo: Number(raw.stockMinimo ?? 1),
+      stock: raw.agotado ? 0 : 1,
+      stockMinimo: 1,
       unidad: raw.unidad || "unidad",
       activo: true,
       destacado: Boolean(raw.destacado),
@@ -635,6 +635,7 @@ function Products({ data, categories, brands, reload }: { data: AnyRow; categori
       etiquetaDestacada: raw.etiquetaDestacada || null,
       enOferta: Boolean(raw.enOferta),
       nuevo: Boolean(raw.nuevo),
+      agotado: Boolean(raw.agotado),
       tags: String(raw.nombre ?? "").toLowerCase().split(/\s+/).slice(0, 8),
     };
     await api(editing ? `/api/admin/productos/${editing.id}` : "/api/admin/productos", {
@@ -658,7 +659,7 @@ function Products({ data, categories, brands, reload }: { data: AnyRow; categori
   return (
     <div className="grid gap-4">
       <Panel title={editing ? "Editar producto" : "Agregar producto"} help="Crea o actualiza productos del catalogo. Las imagenes se guardan en /uploads para que sean visibles desde cualquier dispositivo.">
-        <form key={editing?.id ?? "new"} onSubmit={submit} className="grid gap-3 md:grid-cols-4">
+        <form key={editing?.id ?? "new"} onSubmit={submit} className="grid gap-3 md:grid-cols-2 lg:grid-cols-4">
           <Field name="codigoInterno" label="Codigo interno" help="Identificador unico usado en catalogo, pedidos y PDF." defaultValue={editing?.codigoInterno ?? ""} required />
           <Field name="nombre" label="Nombre" help="Nombre comercial visible para clientes." defaultValue={editing?.nombre ?? ""} required />
           <label className="grid gap-1 text-sm font-semibold text-neutral-700">
@@ -676,8 +677,6 @@ function Products({ data, categories, brands, reload }: { data: AnyRow; categori
           </label>
           <Field name="precioUnitario" label="P. unitario" help="Precio referencial por unidad que ve el cliente." type="number" step="0.01" defaultValue={editing?.precioUnitario ?? ""} required />
           <Field name="precioCaja" label="P. caja" help="Precio alternativo para venta por caja, si aplica." type="number" step="0.01" defaultValue={editing?.precioCaja ?? ""} />
-          <Field name="stock" label="Stock" help="Cantidad disponible referencial. El pedido no descuenta stock automaticamente." type="number" defaultValue={editing?.stock ?? 0} />
-          <Field name="stockMinimo" label="Stock minimo" help="Umbral para alertar stock bajo." type="number" defaultValue={editing?.stockMinimo ?? 1} />
           <Field name="unidad" label="Unidad" defaultValue={editing?.unidad ?? "unidad"} />
           <Field name="ordenDestacado" label="Orden en home" type="number" defaultValue={editing?.ordenDestacado ?? 0} />
           <label className="grid gap-1 text-sm font-semibold text-neutral-700">Etiqueta destacada
@@ -700,11 +699,12 @@ function Products({ data, categories, brands, reload }: { data: AnyRow; categori
               }
             }} className="h-10 rounded border border-neutral-300 px-3 py-2 text-xs" />
           </label>
-          <div className="flex flex-wrap items-center gap-4 md:col-span-4">
+          <div className="flex flex-wrap items-center gap-4 md:col-span-2 lg:col-span-4">
             <label className="inline-flex items-center gap-2 text-sm font-bold"><input name="destacado" type="checkbox" defaultChecked={editing?.destacado ?? false} /> Destacado</label>
             <label className="inline-flex items-center gap-2 text-sm font-bold"><input name="mostrarEnHome" type="checkbox" defaultChecked={editing?.mostrarEnHome ?? false} /> Mostrar en home</label>
             <label className="inline-flex items-center gap-2 text-sm font-bold"><input name="enOferta" type="checkbox" defaultChecked={editing?.enOferta ?? false} /> Oferta</label>
             <label className="inline-flex items-center gap-2 text-sm font-bold"><input name="nuevo" type="checkbox" defaultChecked={editing?.nuevo ?? false} /> Nuevo</label>
+            <label className="inline-flex items-center gap-2 rounded-full border border-neutral-200 px-3 py-2 text-sm font-bold"><input name="agotado" type="checkbox" defaultChecked={editing?.agotado ?? false} /> Disponible / Sin stock</label>
             <button className="h-10 rounded bg-[#D32F2F] px-4 text-sm font-bold text-white">Guardar producto</button>
             {editing ? (
               <button type="button" onClick={() => setEditing(null)} className="h-10 rounded border border-neutral-300 px-4 text-sm font-bold">
@@ -721,8 +721,8 @@ function Products({ data, categories, brands, reload }: { data: AnyRow; categori
           <span className="text-xs font-semibold text-neutral-500">{filteredProducts.length} productos</span>
         </div>
         <DataTable
-          rows={visibleProducts}
-          columns={["codigoInterno", "nombre", "precioUnitario", "stock", "destacado", "mostrarEnHome", "ordenDestacado"]}
+          rows={visibleProducts.map((product: AnyRow) => ({ ...product, disponibilidad: product.agotado ? "Sin stock" : "Disponible" }))}
+          columns={["codigoInterno", "nombre", "precioUnitario", "disponibilidad", "destacado", "enOferta", "nuevo"]}
           renderActions={(row) => (
             <div className="flex gap-2">
               <button onClick={() => setEditing(row)} className="rounded border border-neutral-300 px-2 py-1 text-xs font-bold">Editar</button>
@@ -1545,10 +1545,9 @@ function Reports({ data }: { data: AnyRow }) {
       <Panel title="Top productos">
         <DataTable rows={data.productos?.rows ?? []} columns={["codigoInterno", "nombre", "unidades", "ingresos"]} />
       </Panel>
-      <div className="grid gap-4 md:grid-cols-3">
-        <Kpi label="Valor inventario" value={money(data.inventario?.valorTotal ?? 0)} />
-        <Kpi label="Stock bajo" value={data.inventario?.stockBajo?.length ?? 0} />
-        <Kpi label="Agotados" value={data.inventario?.agotados?.length ?? 0} />
+      <div className="grid gap-4 md:grid-cols-2">
+        <Kpi label="Productos disponibles" value={data.inventario?.disponibles?.length ?? 0} />
+        <Kpi label="Sin stock" value={data.inventario?.agotados?.length ?? 0} />
       </div>
     </div>
   );
@@ -1607,7 +1606,23 @@ function DataTable({
 }) {
   const hasActions = Boolean(linkPrefix || renderActions);
   return (
-    <div className="overflow-x-auto">
+    <>
+    <div className="grid gap-3 lg:hidden">
+      {rows.map((row, index) => (
+        <div key={row.id ?? index} className="rounded border border-neutral-200 bg-white p-3 shadow-sm">
+          <div className="grid gap-2">
+            {columns.map((column) => (
+              <div key={column} className="grid grid-cols-[120px_1fr] gap-2 text-sm">
+                <span className="text-[11px] font-bold uppercase tracking-wide text-neutral-500">{column}</span>
+                <span className="min-w-0 break-words font-semibold text-neutral-900">{typeof row[column] === "number" && column.toLowerCase().includes("precio") ? money(row[column]) : String(row[column] ?? "")}</span>
+              </div>
+            ))}
+          </div>
+          {hasActions ? <div className="mt-3 flex flex-wrap gap-2 border-t border-neutral-100 pt-3">{renderActions ? renderActions(row) : <Link href={`${linkPrefix}/${row.id}`} className="rounded border border-neutral-300 px-2 py-1 text-xs font-bold">Ver</Link>}</div> : null}
+        </div>
+      ))}
+    </div>
+    <div className="hidden overflow-x-auto lg:block">
       <table className="w-full min-w-[760px] text-left text-sm">
         <thead className="bg-neutral-50 text-xs uppercase tracking-wide text-neutral-500">
           <tr>
@@ -1633,5 +1648,6 @@ function DataTable({
         </tbody>
       </table>
     </div>
+    </>
   );
 }

@@ -273,6 +273,25 @@ async function getSettingsMap() {
   return new Map(settings.map((setting) => [setting.clave, setting.valor]));
 }
 
+const defaultSettings = [
+  { clave: "plin_qr_url", valor: "", tipo: "image", grupo: "pagos", label: "QR Plin" },
+  { clave: "plin_qr_activo", valor: "false", tipo: "boolean", grupo: "pagos", label: "Activar QR Plin" },
+  { clave: "plin_qr_texto", valor: "Tambien puedes pagar escaneando este QR de Plin.", tipo: "string", grupo: "pagos", label: "Texto QR Plin" },
+  { clave: "plin_metodo_titulo", valor: "Pago Contra Entrega / Pago por Plin", tipo: "string", grupo: "pagos", label: "Titulo metodos de pago" },
+];
+
+async function ensureDefaultSettings() {
+  await Promise.all(
+    defaultSettings.map((setting) =>
+      prisma.setting.upsert({
+        where: { clave: setting.clave },
+        create: setting,
+        update: {},
+      }),
+    ),
+  );
+}
+
 async function getOrderStates() {
   const settings = await getSettingsMap();
   try {
@@ -506,6 +525,10 @@ async function publicGet(request: NextRequest, segments: string[]) {
         proformaText: settings.get("texto_proforma") ?? "Documento interno para validacion y preparacion del pedido.",
         cartMessage: settings.get("mensaje_carrito") ?? "Completa tus datos para coordinar tu pedido.",
         checkoutMessage: settings.get("mensaje_checkout") ?? "El pedido sera revisado y coordinado por WhatsApp.",
+        plinQrUrl: settings.get("plin_qr_url") ?? "",
+        plinQrActivo: settings.get("plin_qr_activo") === "true",
+        plinQrTexto: settings.get("plin_qr_texto") ?? "Tambien puedes pagar escaneando este QR de Plin.",
+        plinMetodoTitulo: settings.get("plin_metodo_titulo") ?? "Pago Contra Entrega / Pago por Plin",
         maintenanceMode: settings.get("modo_mantenimiento") === "true",
         socialFacebook: settings.get("social_facebook") ?? "",
         socialInstagram: settings.get("social_instagram") ?? "",
@@ -940,7 +963,7 @@ async function checkout(request: NextRequest) {
     })),
   });
   const numero = await nextOrderNumber();
-  const contacto = data.contacto || data.nombre || user?.nombre || "Cliente Invitado";
+  const contacto = data.contacto || data.nombre || user?.nombre || "Cliente invitado";
   const partes = contacto.trim().split(/\s+/);
   const clienteNombre = user?.nombre ?? partes[0] ?? "Cliente";
   const clienteApellido = user?.apellido ?? (partes.slice(1).join(" ") || "-");
@@ -958,7 +981,7 @@ async function checkout(request: NextRequest) {
         clienteTelefono: telefono,
         clienteDni: data.dni || user?.dni,
         clienteRuc: data.ruc || user?.ruc,
-        clienteNegocio: data.nombreNegocio || user?.nombreNegocio || (user ? null : "Cliente Invitado"),
+        clienteNegocio: data.nombreNegocio || user?.nombreNegocio || (user ? null : "Cliente invitado / Pedido rapido"),
         entregaDireccion: data.direccion,
         entregaDistrito: data.distrito || "Por coordinar",
         entregaProvincia: data.provincia,
@@ -1216,6 +1239,7 @@ async function adminGet(request: NextRequest, segments: string[]) {
   }
   if (first === "reportes") return reports(second ?? "dashboard", request);
   if (first === "configuracion") {
+    await ensureDefaultSettings();
     const settings = await prisma.setting.findMany({ orderBy: [{ grupo: "asc" }, { clave: "asc" }] });
     return ok({ settings });
   }
@@ -1308,9 +1332,10 @@ async function adminPost(request: NextRequest, segments: string[]) {
 
   if (first === "banners") {
     const body = await readJson(request);
+    const tipo = asString(body.tipo, "principal_home");
     const banner = await prisma.banner.create({
       data: {
-        titulo: asString(body.titulo),
+        titulo: asString(body.titulo) || (tipo === "full_width" ? "Banner imagen completa" : "Banner Global Norte"),
         subtitulo: asString(body.subtitulo),
         descripcion: asString(body.descripcion),
         ctaTexto: asString(body.ctaTexto),
@@ -1318,7 +1343,7 @@ async function adminPost(request: NextRequest, segments: string[]) {
         imagenDesktop: asString(body.imagenDesktop),
         imagenMobile: asString(body.imagenMobile),
         posicion: asString(body.posicion, "hero"),
-        tipo: asString(body.tipo, "principal_home"),
+        tipo,
         colorTexto: asString(body.colorTexto, "light"),
         activo: body.activo !== false,
         orden: Number(body.orden ?? 0),
@@ -1648,10 +1673,11 @@ async function adminPut(request: NextRequest, segments: string[]) {
   }
 
   if (first === "banners" && second) {
+    const tipo = asString(body.tipo, "principal_home");
     const banner = await prisma.banner.update({
       where: { id: second },
       data: {
-        titulo: asString(body.titulo),
+        titulo: asString(body.titulo) || (tipo === "full_width" ? "Banner imagen completa" : "Banner Global Norte"),
         subtitulo: asString(body.subtitulo),
         descripcion: asString(body.descripcion),
         ctaTexto: asString(body.ctaTexto),
@@ -1659,7 +1685,7 @@ async function adminPut(request: NextRequest, segments: string[]) {
         imagenDesktop: asString(body.imagenDesktop),
         imagenMobile: asString(body.imagenMobile),
         posicion: asString(body.posicion),
-        tipo: asString(body.tipo, "principal_home"),
+        tipo,
         colorTexto: asString(body.colorTexto),
         activo: body.activo !== false,
         orden: Number(body.orden ?? 0),
@@ -2212,35 +2238,43 @@ async function uploadFile(request: NextRequest) {
   const form = await request.formData();
   const file = form.get("file");
   if (!(file instanceof File)) return fail("Archivo no enviado", 400);
-  if (!["image/jpeg", "image/png", "image/webp"].includes(file.type)) return fail("Formato no permitido. Usa JPG, PNG o WEBP", 400);
-  const max = Number(process.env.MAX_FILE_SIZE ?? 10485760);
-  if (file.size > max) return fail("Archivo demasiado grande", 413);
+  const declaredType = file.type || "";
+  const allowedDeclared = ["image/jpeg", "image/png", "image/webp", "image/avif", "image/heic", "image/heif", "application/octet-stream"];
+  if (!allowedDeclared.includes(declaredType)) return fail("Formato no permitido. Usa JPG, PNG, WEBP o AVIF", 400);
+  const configuredMax = Number(process.env.MAX_FILE_SIZE ?? 0);
+  const max = Number.isFinite(configuredMax) && configuredMax > 0 ? Math.max(configuredMax, 26214400) : 26214400;
+  if (file.size > max) return fail(`Archivo demasiado grande. Maximo ${Math.round(max / 1024 / 1024)}MB`, 413);
   const buffer = Buffer.from(await file.arrayBuffer());
   const folder = asString(form.get("folder"), "general").replace(/[^a-z0-9-]/gi, "").toLowerCase() || "general";
   const uploadRoot = path.resolve(process.env.UPLOAD_DIR ?? "./public/uploads");
   const uploadDir = path.join(uploadRoot, folder);
   await fs.mkdir(uploadDir, { recursive: true });
-  const baseName = `${Date.now()}-${makeSlug(file.name.replace(/\.[^.]+$/, ""))}`;
-  let name = `${baseName}.webp`;
-  let fullPath = path.join(uploadDir, name);
+  const baseName = `${Date.now()}-${randomBytes(4).toString("hex")}-${makeSlug(file.name.replace(/\.[^.]+$/, "")) || "imagen"}`;
+  const name = `${baseName}.webp`;
+  const fullPath = path.join(uploadDir, name);
+  const originalMetadata = await sharp(buffer).metadata().catch(() => null);
+  const realFormat = originalMetadata?.format;
+  if (!realFormat) return fail("No se pudo leer la imagen. Verifica que el archivo no este danado.", 400);
+  if (!["jpeg", "png", "webp", "avif", "heif"].includes(realFormat)) return fail("Formato no permitido. Usa JPG, PNG, WEBP o AVIF", 400);
   try {
-    await sharp(buffer).resize({ width: 1600, height: 1600, fit: "inside", withoutEnlargement: true }).webp({ quality: 84 }).toFile(fullPath);
-  } catch {
-    const extensionByType: Record<string, string> = {
-      "image/jpeg": "jpg",
-      "image/png": "png",
-      "image/webp": "webp",
-    };
-    name = `${baseName}.${extensionByType[file.type] ?? "jpg"}`;
-    fullPath = path.join(uploadDir, name);
-    await fs.writeFile(fullPath, buffer);
+    await sharp(buffer)
+      .rotate()
+      .resize({ width: 2000, height: 2000, fit: "inside", withoutEnlargement: true })
+      .webp({ quality: 84, effort: 4 })
+      .toFile(fullPath);
+  } catch (error) {
+    if (realFormat === "heif" || declaredType === "image/heic" || declaredType === "image/heif") {
+      return fail("Formato HEIC no soportado en este servidor, por favor sube JPG/PNG/WebP", 415);
+    }
+    console.error("upload-image-error", error);
+    return fail("No se pudo procesar la imagen. Intenta con JPG, PNG, WEBP o AVIF.", 422);
   }
   const url = `/uploads/${folder}/${name}`;
-  const [stat, metadata] = await Promise.all([fs.stat(fullPath), sharp(buffer).metadata().catch(() => null)]);
+  const [stat, metadata] = await Promise.all([fs.stat(fullPath), sharp(fullPath).metadata().catch(() => null)]);
   await prisma.mediaAsset.upsert({
     where: { path: url },
-    create: { path: url, originalName: file.name, mimeType: file.type, size: stat.size, width: metadata?.width, height: metadata?.height, folder, createdBy: admin.id },
-    update: { originalName: file.name, mimeType: file.type, size: stat.size, width: metadata?.width, height: metadata?.height, folder },
+    create: { path: url, originalName: file.name, mimeType: "image/webp", size: stat.size, width: metadata?.width, height: metadata?.height, folder, createdBy: admin.id },
+    update: { originalName: file.name, mimeType: "image/webp", size: stat.size, width: metadata?.width, height: metadata?.height, folder },
   });
   return ok({ success: true, data: { url }, url });
 }

@@ -35,7 +35,7 @@ type Brand = { id: string; nombre: string; slug: string; logo?: string | null; d
 type Banner = { id: string; titulo: string; subtitulo?: string | null; descripcion?: string | null; ctaTexto?: string | null; ctaLink?: string | null; imagenDesktop: string; imagenMobile?: string | null; activo: boolean; posicion?: string; tipo?: string };
 type StoreNotification = { id: string; titulo: string; mensaje: string; tipo: string };
 type CommerceBenefit = { subtotal: number; discount: number; total: number; coupon?: { code: string; description: string } | null; bonuses: Array<{ name: string; description?: string; quantity: number }>; customerBenefit?: { couponCode?: string | null; message?: string | null } | null };
-type CompanyContact = { name: string; legalName?: string; ruc: string; whatsappDisplay: string; whatsappNumber: string; email: string; address: string; logoUrl?: string; receiptText?: string; proformaText?: string; cartMessage?: string; checkoutMessage?: string; maintenanceMode?: boolean; socialFacebook?: string; socialInstagram?: string; socialTiktok?: string };
+type CompanyContact = { name: string; legalName?: string; ruc: string; whatsappDisplay: string; whatsappNumber: string; email: string; address: string; logoUrl?: string; receiptText?: string; proformaText?: string; cartMessage?: string; checkoutMessage?: string; plinQrUrl?: string; plinQrActivo?: boolean; plinQrTexto?: string; plinMetodoTitulo?: string; maintenanceMode?: boolean; socialFacebook?: string; socialInstagram?: string; socialTiktok?: string };
 type Product = {
   id: string;
   codigoInterno: string;
@@ -401,6 +401,10 @@ export function StoreApp({ route }: { route: string[] }) {
       toast.error("Producto no disponible");
       return;
     }
+    if (found.agotado) {
+      toast.error("Este producto esta sin stock por el momento");
+      return;
+    }
     const normalizedType = tipoPrecio === "caja" && found.precioCaja ? "caja" : "unidad";
     const currentCart = cart ?? { id: "local", items: [] };
     const itemId = makeCartItemId(found.id, normalizedType);
@@ -560,7 +564,7 @@ export function StoreApp({ route }: { route: string[] }) {
           <CartView cart={cart} total={cartTotal} user={user} banners={banners} message={company.cartMessage} onUpdate={updateCartItem} onRemove={removeCartItem} onClear={clearCart} />
         ) : null}
         {view === "checkout" ? <CheckoutView cart={cart} total={cartTotal} user={user} authReady={authReady} message={company.checkoutMessage} onClear={clearCart} /> : null}
-        {view === "pedido-confirmado" ? <ConfirmedView order={order} receiptText={company.receiptText} user={user} /> : null}
+        {view === "pedido-confirmado" ? <ConfirmedView order={order} company={company} user={user} /> : null}
         {view === "mi-cuenta" ? <AccountView user={user} orders={orders} order={order} route={route} /> : null}
         {view === "catalogo" && route[1] && product ? (
           <ProductDetail product={product} related={related} onAdd={addToCart} />
@@ -634,6 +638,23 @@ function HeaderLink({ href, label }: { href: string; label: string }) {
 
 function Hero({ banner, onHelp, logoUrl }: { banner?: Banner; onHelp: () => void; logoUrl: string }) {
   const hasCustomImage = Boolean(banner?.imagenDesktop && banner.imagenDesktop !== logoUrl);
+  if (banner?.tipo === "full_width" && banner.imagenDesktop) {
+    return (
+      <section className="bg-[#F4F5F7] px-4 py-6">
+        <div className="mx-auto max-w-7xl overflow-hidden rounded-[22px] bg-neutral-100 shadow-[0_24px_70px_rgba(17,17,17,0.14)] sm:rounded-[28px]">
+          <picture>
+            <source media="(max-width: 640px)" srcSet={imageSrc(banner.imagenMobile || banner.imagenDesktop)} />
+            <img
+              src={imageSrc(banner.imagenDesktop)}
+              onError={usePlaceholderImage}
+              alt={banner.titulo || "Banner Global Norte"}
+              className="block h-auto max-h-[520px] min-h-[220px] w-full object-cover sm:min-h-[320px]"
+            />
+          </picture>
+        </div>
+      </section>
+    );
+  }
   return (
     <section className="bg-[#F4F5F7] px-4 py-6">
       <div className="mx-auto grid max-w-7xl overflow-hidden rounded-[22px] bg-[radial-gradient(circle_at_82%_20%,rgba(255,255,255,0.28),transparent_28%),linear-gradient(135deg,#111111_0%,#D71920_48%,#F9FAFB_100%)] shadow-[0_24px_70px_rgba(17,17,17,0.18)] sm:rounded-[28px] lg:grid-cols-[1.05fr_0.95fr]">
@@ -1233,7 +1254,7 @@ function CheckoutView({ cart, total, user, authReady, message, onClear }: { cart
     <section className="mx-auto grid max-w-7xl gap-6 px-4 py-8 lg:grid-cols-[1fr_360px]">
       <form onSubmit={submit} className="rounded border border-neutral-200 bg-white p-5">
         <h1 className="mb-5 text-2xl font-extrabold text-neutral-950">Registrar pedido</h1>
-        {!user ? <p className="mb-4 rounded border border-neutral-200 bg-neutral-50 p-3 text-sm font-bold text-neutral-700">Continuar como invitado. Guardaremos el pedido como Cliente Invitado.</p> : null}
+        {!user ? <p className="mb-4 rounded border border-neutral-200 bg-neutral-50 p-3 text-sm font-bold text-neutral-700">Pedido rapido / Cliente invitado. No necesitas crear cuenta y el celular es opcional.</p> : null}
         {recent ? (
           <div className="mb-4 rounded border border-red-100 bg-[#FFF5F5] p-3 text-sm font-semibold text-neutral-700">
             <p>Tienes un pedido reciente ({recent.order.numero}). Puedes agregar estos productos a tu pedido anterior hasta {recent.expiresAt ? new Date(recent.expiresAt).toLocaleTimeString("es-PE", { hour: "2-digit", minute: "2-digit" }) : "los proximos minutos"}.</p>
@@ -1248,7 +1269,7 @@ function CheckoutView({ cart, total, user, authReady, message, onClear }: { cart
           <TextInput name="nombreNegocio" label="Nombre del negocio" defaultValue={user?.nombreNegocio ?? ""} />
           <TextInput name="contacto" label="Nombre" defaultValue={user ? `${user.nombre} ${user.apellido}` : ""} required />
           <TextInput name="dni" label="DNI/RUC opcional" defaultValue={user?.dni ?? user?.ruc ?? ""} />
-          <TextInput name="telefono" label="Celular" defaultValue={user?.telefono ?? ""} required />
+          <TextInput name="telefono" label="Celular opcional" defaultValue={user?.telefono ?? ""} />
           <TextInput name="direccion" label="Direccion" defaultValue={user?.direccion ?? ""} required />
           <TextInput name="referencia" label="Referencia" defaultValue={user?.referencia ?? ""} />
           <TextInput name="mapsUrl" label="Link de Google Maps" type="url" placeholder="https://maps.google.com/..." />
@@ -1303,7 +1324,7 @@ function CheckoutView({ cart, total, user, authReady, message, onClear }: { cart
   );
 }
 
-function ConfirmedView({ order, receiptText, user }: { order: Order | null; receiptText?: string; user?: User | null }) {
+function ConfirmedView({ order, company, user }: { order: Order | null; company: CompanyContact; user?: User | null }) {
   return (
     <section className="mx-auto max-w-2xl px-4 py-12">
       <div className="rounded border border-neutral-200 bg-white p-6 text-center">
@@ -1329,14 +1350,21 @@ function ConfirmedView({ order, receiptText, user }: { order: Order | null; rece
               </div>
             </div>
             <p className="mt-4 text-xs font-semibold text-neutral-500">
-              {receiptText || "Pedido sujeto a confirmacion de disponibilidad, precios y entrega. No es comprobante de pago."}
+              {company.receiptText || "Pedido sujeto a confirmacion de disponibilidad, precios y entrega. No es comprobante de pago."}
             </p>
+            {company.plinQrActivo && company.plinQrUrl ? (
+              <div className="mx-auto mt-5 max-w-sm rounded-2xl border border-red-100 bg-[#FFF5F5] p-4">
+                <h2 className="text-base font-black text-neutral-950">{company.plinMetodoTitulo || "Pago Contra Entrega / Pago por Plin"}</h2>
+                <img src={imageSrc(company.plinQrUrl)} onError={usePlaceholderImage} alt="QR Plin Global Norte" className="mx-auto mt-3 h-48 w-48 rounded-xl border border-white bg-white object-contain p-2 shadow-sm" />
+                <p className="mt-3 text-xs font-semibold leading-5 text-neutral-600">{company.plinQrTexto || "Tambien puedes pagar escaneando este QR de Plin."}</p>
+              </div>
+            ) : null}
             {order.entregaMapsUrl ? <a href={order.entregaMapsUrl} target="_blank" rel="noreferrer" className="mt-3 inline-flex text-sm font-bold text-[#D71920]">Abrir ubicacion registrada</a> : null}
             <div className="mt-5 flex flex-wrap justify-center gap-3">
               {order.pdfUrl ? <a href={`/api/pdf/${order.id}${user ? "" : "?guest=1"}`} target="_blank" className="inline-flex h-11 items-center gap-2 rounded border border-neutral-300 px-4 text-sm font-bold" rel="noreferrer"><ClipboardList className="h-4 w-4" /> Descargar PDF</a> : null}
               <button onClick={() => window.print()} className="inline-flex h-11 items-center rounded border border-neutral-300 px-4 text-sm font-bold">Imprimir</button>
               {user ? <Link href="/mi-cuenta/pedidos" className="inline-flex h-11 items-center rounded border border-neutral-300 px-4 text-sm font-bold">Ver mis pedidos</Link> : null}
-              <a href={`https://wa.me/${COMPANY.whatsappNumber}?text=${encodeURIComponent(`Hola Global Norte, deseo coordinar el pedido ${order.numero}. Total estimado: ${money(order.total)}`)}`} target="_blank" rel="noreferrer" className="inline-flex h-11 items-center rounded border border-green-300 px-4 text-sm font-bold text-green-700">Coordinar por WhatsApp</a>
+              <a href={`https://wa.me/${company.whatsappNumber || COMPANY.whatsappNumber}?text=${encodeURIComponent(`Hola Global Norte, deseo coordinar el pedido ${order.numero}. Total estimado: ${money(order.total)}`)}`} target="_blank" rel="noreferrer" className="inline-flex h-11 items-center rounded border border-green-300 px-4 text-sm font-bold text-green-700">Coordinar por WhatsApp</a>
               <Link href="/catalogo" className="inline-flex h-11 items-center rounded bg-[#D32F2F] px-4 text-sm font-bold text-white">Seguir comprando</Link>
             </div>
           </>

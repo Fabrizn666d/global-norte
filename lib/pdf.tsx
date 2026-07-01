@@ -7,7 +7,7 @@ import { COMPANY } from "@/lib/company";
 import { prisma } from "@/lib/db";
 import { money } from "@/lib/format";
 
-type CompanyInfo = { name: string; legalName: string; ruc: string; whatsappDisplay: string; whatsappNumber: string; email: string; address: string; logoUrl: string; receiptText: string; proformaText: string };
+type CompanyInfo = { name: string; legalName: string; ruc: string; whatsappDisplay: string; whatsappNumber: string; email: string; address: string; logoUrl: string; receiptText: string; proformaText: string; plinQrUrl: string; plinQrActivo: boolean; plinQrTexto: string; plinMetodoTitulo: string };
 
 type PdfOrder = {
   numero: string;
@@ -95,6 +95,11 @@ const styles = StyleSheet.create({
   totals: { width: "34%", border: `1 solid ${line}`, borderRadius: 8, overflow: "hidden" },
   totalLine: { flexDirection: "row", justifyContent: "space-between", paddingVertical: 6, paddingHorizontal: 10, borderBottom: `1 solid ${line}`, fontSize: 9 },
   grandTotal: { flexDirection: "row", justifyContent: "space-between", backgroundColor: red, color: "#FFFFFF", paddingVertical: 9, paddingHorizontal: 10, fontSize: 13, fontWeight: 700 },
+  paymentQrBox: { marginTop: 10, border: `1 solid #FECACA`, borderRadius: 8, padding: 10, backgroundColor: "#FFF5F5", flexDirection: "row", alignItems: "center" },
+  paymentQrImage: { width: 82, height: 82, objectFit: "contain", backgroundColor: "#FFFFFF", padding: 4, borderRadius: 6 },
+  paymentQrTextWrap: { flex: 1, paddingLeft: 10 },
+  paymentQrTitle: { fontSize: 10, fontWeight: 700, color: dark, marginBottom: 4 },
+  paymentQrText: { fontSize: 8.5, color: gray, lineHeight: 1.35 },
   signatureRow: { flexDirection: "row", marginTop: 18 },
   signature: { width: 190, borderTop: "1 solid #9CA3AF", paddingTop: 6, textAlign: "center", color: gray, fontSize: 8 },
   footer: { position: "absolute", bottom: 16, left: 26, right: 26, borderTop: `1 solid ${line}`, paddingTop: 8, color: gray, fontSize: 8, textAlign: "center" },
@@ -107,9 +112,20 @@ async function logoSource(logoUrl: string) {
   return `data:image/png;base64,${png.toString("base64")}`;
 }
 
+async function imageDataSource(imageUrl?: string | null) {
+  if (!imageUrl?.startsWith("/") || imageUrl.includes("..")) return null;
+  try {
+    const file = await fs.readFile(path.join(process.cwd(), "public", imageUrl.replace(/^\//, "")));
+    const png = await sharp(file).resize({ width: 420, height: 420, fit: "inside", withoutEnlargement: true }).png().toBuffer();
+    return `data:image/png;base64,${png.toString("base64")}`;
+  } catch {
+    return null;
+  }
+}
+
 async function companyInfo(): Promise<CompanyInfo> {
   const rows = await prisma.setting.findMany({
-    where: { clave: { in: ["nombre_empresa", "ruc", "telefono", "whatsapp", "email", "direccion"] } },
+    where: { clave: { in: ["nombre_empresa", "razon_social", "ruc", "telefono", "whatsapp", "email", "direccion", "logo_url", "texto_recibo", "texto_proforma", "plin_qr_url", "plin_qr_activo", "plin_qr_texto", "plin_metodo_titulo"] } },
   });
   const settings = new Map(rows.map((row) => [row.clave, row.valor]));
   return {
@@ -124,6 +140,10 @@ async function companyInfo(): Promise<CompanyInfo> {
     logoUrl: settings.get("logo_url") ?? "/brand/global-norte-logo.jpg",
     receiptText: settings.get("texto_recibo") ?? "No es comprobante de pago ni factura electronica. Pedido sujeto a confirmacion.",
     proformaText: settings.get("texto_proforma") ?? "Documento interno para validacion y preparacion del pedido.",
+    plinQrUrl: settings.get("plin_qr_url") ?? "",
+    plinQrActivo: settings.get("plin_qr_activo") === "true",
+    plinQrTexto: settings.get("plin_qr_texto") ?? "Tambien puedes pagar escaneando este QR de Plin.",
+    plinMetodoTitulo: settings.get("plin_metodo_titulo") ?? "Pago Contra Entrega / Pago por Plin",
   };
 }
 
@@ -255,6 +275,19 @@ function TotalsAndMessage({ order, company, admin = false }: { order: PdfOrder; 
   );
 }
 
+function PaymentQr({ company, qrSrc }: { company: CompanyInfo; qrSrc?: string | null }) {
+  if (!company.plinQrActivo || !qrSrc) return null;
+  return (
+    <View style={styles.paymentQrBox}>
+      <Image src={qrSrc} style={styles.paymentQrImage} />
+      <View style={styles.paymentQrTextWrap}>
+        <Text style={styles.paymentQrTitle}>{company.plinMetodoTitulo}</Text>
+        <Text style={styles.paymentQrText}>{company.plinQrTexto}</Text>
+      </View>
+    </View>
+  );
+}
+
 function Footer({ company }: { company: CompanyInfo }) {
   return (
     <Text style={styles.footer}>
@@ -263,7 +296,7 @@ function Footer({ company }: { company: CompanyInfo }) {
   );
 }
 
-function ClientReceipt({ order, logoSrc, company }: { order: PdfOrder; logoSrc: string; company: CompanyInfo }) {
+function ClientReceipt({ order, logoSrc, company, qrSrc }: { order: PdfOrder; logoSrc: string; company: CompanyInfo; qrSrc?: string | null }) {
   return (
     <Document title={`Recibo de pedido ${order.numero}`} author={company.name}>
       <Page size="A4" style={styles.page}>
@@ -271,13 +304,14 @@ function ClientReceipt({ order, logoSrc, company }: { order: PdfOrder; logoSrc: 
         <CustomerAndDelivery order={order} />
         <ItemsTable order={order} />
         <TotalsAndMessage order={order} company={company} />
+        <PaymentQr company={company} qrSrc={qrSrc} />
         <Footer company={company} />
       </Page>
     </Document>
   );
 }
 
-function AdminProforma({ order, logoSrc, company }: { order: PdfOrder; logoSrc: string; company: CompanyInfo }) {
+function AdminProforma({ order, logoSrc, company, qrSrc }: { order: PdfOrder; logoSrc: string; company: CompanyInfo; qrSrc?: string | null }) {
   return (
     <Document title={`Proforma ${order.numero}`} author={company.name}>
       <Page size="A4" style={styles.page}>
@@ -289,6 +323,7 @@ function AdminProforma({ order, logoSrc, company }: { order: PdfOrder; logoSrc: 
         <CustomerAndDelivery order={order} admin />
         <ItemsTable order={order} admin />
         <TotalsAndMessage order={order} company={company} admin />
+        <PaymentQr company={company} qrSrc={qrSrc} />
         <View style={styles.signatureRow}>
           <View style={styles.signature}><Text>Validacion de disponibilidad</Text></View>
           <View style={styles.sectionGap} />
@@ -311,10 +346,10 @@ async function writePdf(fileName: string, document: React.ReactElement) {
 
 export async function createOrderPdf(order: PdfOrder) {
   const company = await companyInfo();
-  return writePdf(`${order.numero}-recibo-global-norte.pdf`, <ClientReceipt order={order} logoSrc={await logoSource(company.logoUrl)} company={company} />);
+  return writePdf(`${order.numero}-recibo-global-norte.pdf`, <ClientReceipt order={order} logoSrc={await logoSource(company.logoUrl)} company={company} qrSrc={await imageDataSource(company.plinQrUrl)} />);
 }
 
 export async function createAdminOrderPdf(order: PdfOrder) {
   const company = await companyInfo();
-  return writePdf(`${order.numero}-proforma-admin-global-norte.pdf`, <AdminProforma order={order} logoSrc={await logoSource(company.logoUrl)} company={company} />);
+  return writePdf(`${order.numero}-proforma-admin-global-norte.pdf`, <AdminProforma order={order} logoSrc={await logoSource(company.logoUrl)} company={company} qrSrc={await imageDataSource(company.plinQrUrl)} />);
 }

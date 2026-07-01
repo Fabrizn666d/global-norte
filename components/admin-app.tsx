@@ -72,6 +72,7 @@ const nav = [
 ];
 
 const colors = ["#D32F2F", "#1565C0", "#2E7D32", "#E65100", "#424242", "#EF5350"];
+const IMAGE_ACCEPT = "image/jpeg,image/png,image/webp,image/avif,image/heic,image/heif";
 const orderStates = ["nuevo", "en_revision", "confirmado", "preparando", "entregado", "cancelado"];
 const orderStateLabels: Record<string, string> = {
   nuevo: "Nuevo",
@@ -122,7 +123,7 @@ async function api<T>(url: string, init?: RequestInit): Promise<T> {
   return data;
 }
 
-async function uploadAsset(file: File, folder: "products" | "banners") {
+async function uploadAsset(file: File, folder: "products" | "banners" | "qr" | "logos" | "categories" | "brands") {
   const form = new FormData();
   form.set("file", file);
   form.set("folder", folder);
@@ -659,7 +660,7 @@ function Products({ data, categories, brands, reload }: { data: AnyRow; categori
       precioUnitario: Number(raw.precioUnitario),
       precioCaja: raw.precioCaja ? Number(raw.precioCaja) : null,
       imagenPrincipal: imageValue || raw.imagenPrincipal || null,
-      stock: raw.agotado ? 0 : 1,
+      stock: raw.agotado === "true" ? 0 : 1,
       stockMinimo: 1,
       unidad: raw.unidad || "unidad",
       activo: true,
@@ -669,7 +670,7 @@ function Products({ data, categories, brands, reload }: { data: AnyRow; categori
       etiquetaDestacada: raw.etiquetaDestacada || null,
       enOferta: Boolean(raw.enOferta),
       nuevo: Boolean(raw.nuevo),
-      agotado: Boolean(raw.agotado),
+      agotado: raw.agotado === "true",
       tags: String(raw.nombre ?? "").toLowerCase().split(/\s+/).slice(0, 8),
     };
     await api(editing ? `/api/admin/productos/${editing.id}` : "/api/admin/productos", {
@@ -722,7 +723,7 @@ function Products({ data, categories, brands, reload }: { data: AnyRow; categori
           </label>
           <label className="grid gap-1 text-sm font-semibold text-neutral-700">
             Subir imagen
-            <input type="file" accept="image/png,image/jpeg,image/webp" onChange={async (event) => {
+            <input type="file" accept={IMAGE_ACCEPT} onChange={async (event) => {
               const file = event.target.files?.[0];
               if (!file) return;
               try {
@@ -738,7 +739,13 @@ function Products({ data, categories, brands, reload }: { data: AnyRow; categori
             <label className="inline-flex items-center gap-2 text-sm font-bold"><input name="mostrarEnHome" type="checkbox" defaultChecked={editing?.mostrarEnHome ?? false} /> Mostrar en home</label>
             <label className="inline-flex items-center gap-2 text-sm font-bold"><input name="enOferta" type="checkbox" defaultChecked={editing?.enOferta ?? false} /> Oferta</label>
             <label className="inline-flex items-center gap-2 text-sm font-bold"><input name="nuevo" type="checkbox" defaultChecked={editing?.nuevo ?? false} /> Nuevo</label>
-            <label className="inline-flex items-center gap-2 rounded-full border border-neutral-200 px-3 py-2 text-sm font-bold"><input name="agotado" type="checkbox" defaultChecked={editing?.agotado ?? false} /> Disponible / Sin stock</label>
+            <label className="grid min-w-52 gap-1 text-sm font-semibold text-neutral-700">
+              Disponibilidad
+              <select name="agotado" defaultValue={editing?.agotado ? "true" : "false"} className="h-10 rounded border border-neutral-300 bg-white px-3 text-sm font-normal">
+                <option value="false">Disponible</option>
+                <option value="true">Sin stock</option>
+              </select>
+            </label>
             <button className="h-10 rounded bg-[#D32F2F] px-4 text-sm font-bold text-white">Guardar producto</button>
             {editing ? (
               <button type="button" onClick={() => setEditing(null)} className="h-10 rounded border border-neutral-300 px-4 text-sm font-bold">
@@ -847,7 +854,7 @@ function Banners({ rows, reload }: { rows: AnyRow[]; reload: () => void }) {
     await api(editing ? `/api/admin/banners/${editing.id}` : "/api/admin/banners", {
       method: editing ? "PUT" : "POST",
       body: JSON.stringify({
-        titulo: raw.titulo,
+        titulo: raw.titulo || (raw.tipo === "full_width" ? "Banner imagen completa" : "Banner Global Norte"),
         subtitulo: raw.subtitulo,
         descripcion: raw.descripcion,
         ctaTexto: raw.ctaTexto,
@@ -888,7 +895,7 @@ function Banners({ rows, reload }: { rows: AnyRow[]; reload: () => void }) {
     <div className="grid gap-4">
       <Panel title={editing ? "Editar banner" : "Agregar banner"} help="Carga banners comerciales para usar en la tienda. Las imagenes se guardan en una ruta publica compatible con VPS.">
         <form key={editing?.id ?? "new"} onSubmit={submit} className="grid gap-3 md:grid-cols-4">
-          <Field name="titulo" label="Titulo" defaultValue={editing?.titulo ?? ""} required />
+          <Field name="titulo" label="Titulo" defaultValue={editing?.titulo ?? ""} />
           <Field name="subtitulo" label="Subtitulo" defaultValue={editing?.subtitulo ?? ""} />
           <Field name="ctaTexto" label="CTA" defaultValue={editing?.ctaTexto ?? ""} />
           <Field name="ctaLink" label="URL" defaultValue={editing?.ctaLink ?? ""} />
@@ -898,7 +905,7 @@ function Banners({ rows, reload }: { rows: AnyRow[]; reload: () => void }) {
           </label>
           <label className="grid gap-1 text-sm font-semibold text-neutral-700">
             Subir imagen
-            <input type="file" accept="image/png,image/jpeg,image/webp" onChange={async (event) => {
+            <input type="file" accept={IMAGE_ACCEPT} onChange={async (event) => {
               const file = event.target.files?.[0];
               if (!file) return;
               try {
@@ -911,7 +918,7 @@ function Banners({ rows, reload }: { rows: AnyRow[]; reload: () => void }) {
           </label>
           <Field name="posicion" label="Posicion" defaultValue={editing?.posicion ?? "hero"} />
           <label className="grid gap-1 text-sm font-semibold text-neutral-700">Tipo
-            <select name="tipo" defaultValue={editing?.tipo ?? "principal_home"} className="h-10 rounded border border-neutral-300 bg-white px-3 text-sm"><option value="principal_home">Principal home</option><option value="catalogo">Catalogo</option><option value="carrito">Carrito</option><option value="modal">Modal emergente</option><option value="festiva">Fecha festiva</option></select>
+            <select name="tipo" defaultValue={editing?.tipo ?? "principal_home"} className="h-10 rounded border border-neutral-300 bg-white px-3 text-sm"><option value="principal_home">Clasico / Principal home</option><option value="full_width">Imagen completa / Full width</option><option value="catalogo">Catalogo</option><option value="carrito">Carrito</option><option value="modal">Modal emergente</option><option value="festiva">Fecha festiva</option></select>
           </label>
           <Field name="orden" label="Orden" type="number" defaultValue={editing?.orden ?? 0} />
           <Field name="fechaInicio" label="Inicio programado" type="datetime-local" defaultValue={editing?.fechaInicio ? String(editing.fechaInicio).slice(0, 16) : ""} />
@@ -920,7 +927,7 @@ function Banners({ rows, reload }: { rows: AnyRow[]; reload: () => void }) {
             <input name="imagenMobile" value={bannerMobile} onChange={(event) => setBannerMobile(event.target.value)} className="h-10 rounded border border-neutral-300 px-3 text-sm" />
           </label>
           <label className="grid gap-1 text-sm font-semibold text-neutral-700">Cargar archivo movil
-            <input type="file" accept="image/png,image/jpeg,image/webp" onChange={async (event) => { const file = event.target.files?.[0]; if (!file) return; try { setBannerMobile(await uploadAsset(file, "banners")); toast.success("Imagen movil subida"); } catch (error) { toast.error(error instanceof Error ? error.message : "No se pudo subir"); } }} className="h-10 rounded border border-neutral-300 px-3 py-2 text-xs" />
+            <input type="file" accept={IMAGE_ACCEPT} onChange={async (event) => { const file = event.target.files?.[0]; if (!file) return; try { setBannerMobile(await uploadAsset(file, "banners")); toast.success("Imagen movil subida"); } catch (error) { toast.error(error instanceof Error ? error.message : "No se pudo subir"); } }} className="h-10 rounded border border-neutral-300 px-3 py-2 text-xs" />
           </label>
           <div className="flex gap-2 self-end md:col-span-2">
             <button className="h-10 rounded bg-[#D32F2F] px-4 text-sm font-bold text-white">Guardar</button>
@@ -1637,9 +1644,16 @@ function Reports({ data }: { data: AnyRow }) {
 }
 
 function SettingsView({ rows, reload }: { rows: AnyRow[]; reload: () => void }) {
+  const [values, setValues] = useState<Record<string, string>>({});
+  useEffect(() => {
+    setValues(Object.fromEntries(rows.map((row) => [row.clave, String(row.valor ?? "")])));
+  }, [rows]);
+  function setValue(key: string, value: string) {
+    setValues((current) => ({ ...current, [key]: value }));
+  }
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const settings = rows.map((row) => ({ clave: row.clave, valor: String(new FormData(event.currentTarget).get(row.clave) ?? "") }));
+    const settings = rows.map((row) => ({ clave: row.clave, valor: values[row.clave] ?? "" }));
     await api("/api/admin/configuracion", { method: "PUT", body: JSON.stringify({ settings }) });
     toast.success("Configuracion guardada");
     reload();
@@ -1656,9 +1670,45 @@ function SettingsView({ rows, reload }: { rows: AnyRow[]; reload: () => void }) 
       {Object.entries(grouped).map(([group, items]) => (
         <Panel key={group} title={group}>
           <div className="grid gap-3 md:grid-cols-2">
-            {items.map((item) => (
-              <Field key={item.id} name={item.clave} label={item.label ?? item.clave} defaultValue={item.valor} />
-            ))}
+            {items.map((item) => {
+              const key = item.clave as string;
+              if (key === "plin_qr_activo") {
+                return (
+                  <label key={item.id} className="grid gap-1 text-sm font-semibold text-neutral-700">
+                    {item.label ?? item.clave}
+                    <select value={values[key] ?? "false"} onChange={(event) => setValue(key, event.target.value)} className="h-10 rounded border border-neutral-300 bg-white px-3 text-sm font-normal">
+                      <option value="false">Inactivo</option>
+                      <option value="true">Activo</option>
+                    </select>
+                  </label>
+                );
+              }
+              if (key === "plin_qr_url") {
+                return (
+                  <label key={item.id} className="grid gap-2 text-sm font-semibold text-neutral-700">
+                    {item.label ?? item.clave}
+                    <input value={values[key] ?? ""} onChange={(event) => setValue(key, event.target.value)} className="h-10 rounded border border-neutral-300 px-3 text-sm font-normal outline-none focus:border-[#D32F2F]" />
+                    <input type="file" accept={IMAGE_ACCEPT} onChange={async (event) => {
+                      const file = event.target.files?.[0];
+                      if (!file) return;
+                      try {
+                        setValue(key, await uploadAsset(file, "qr"));
+                        toast.success("QR Plin subido. Guarda la configuracion para activarlo.");
+                      } catch (error) {
+                        toast.error(error instanceof Error ? error.message : "No se pudo subir el QR");
+                      }
+                    }} className="h-10 rounded border border-neutral-300 px-3 py-2 text-xs" />
+                    {values[key] ? <img src={adminImageSrc(values[key])} alt="QR Plin" className="h-32 w-32 rounded border border-neutral-200 bg-white object-contain p-2" /> : null}
+                  </label>
+                );
+              }
+              return (
+                <label key={item.id} className="grid gap-1 text-sm font-semibold text-neutral-700">
+                  {item.label ?? item.clave}
+                  <input name={key} value={values[key] ?? ""} onChange={(event) => setValue(key, event.target.value)} className="h-10 rounded border border-neutral-300 px-3 text-sm font-normal outline-none focus:border-[#D32F2F]" />
+                </label>
+              );
+            })}
           </div>
         </Panel>
       ))}
